@@ -1,5 +1,4 @@
 import path from "path";
-import fs from "fs";
 import { app } from "electron";
 
 // 获取用户数据路径

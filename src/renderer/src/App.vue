@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, watch, toRaw } from 'vue'
 import KeyboardView from './components/KeyboardView.vue'
 import CreateRecordModal from './components/CreateRecordModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
@@ -60,6 +60,7 @@ const handleCreateRecord = (name: string) => {
     updatedAt: new Date().toISOString(),
     keys: {}
   }
+  window.api.createRecord(newRecord)
   records.value.push(newRecord)
   currentRecordId.value = newRecord.id
   showCreateModal.value = false
@@ -134,6 +135,8 @@ const saveChanges = () => {
     }
   })
   currentRecord.value.updatedAt = new Date().toISOString()
+
+  window.api.updateRecord(toRaw(currentRecord.value))
 
   Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
   hasChanges.value = false

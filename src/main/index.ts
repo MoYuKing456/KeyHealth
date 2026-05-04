@@ -2,7 +2,8 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { getUserData } from './file/io'
+import { getUserData,createRecord,updateRecord } from './file/io'
+
 
 function createWindow(): void {
   // Create the browser window.
@@ -50,9 +51,18 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  
+  // 获取用户数据的 IPC 处理器
   ipcMain.handle('get-user-data',()=>{
     return getUserData()
+  })
+
+  // 创建记录的 IPC 处理器
+  ipcMain.handle('create-record', (event, data) => {
+    return createRecord(data)
+  })
+
+  ipcMain.handle('update-record', (event, data) => {
+    return updateRecord(data)
   })
 
   createWindow()

@@ -2,7 +2,7 @@ import { getUserDataPath } from "../init/path"
 import path from "path"
 import fs from "fs"
 import { isValidKeyboardHealthFile } from "../validator/jsonValidator"
-import type { KeyboardHealthRecord } from "../validator/jsonValidator"
+import type { KeyboardHealthRecord,KeyboardHealthFile } from "../validator/jsonValidator"
 
 export function getUserData(): KeyboardHealthRecord[] {
   const userDataPath = getUserDataPath()
@@ -32,4 +32,43 @@ export function getUserData(): KeyboardHealthRecord[] {
   }
 
   return result
+}
+
+export function createRecord(record: KeyboardHealthRecord) : void {
+  const userDataPath = getUserDataPath()
+
+  // 1. 构造完整文件结构
+  const fileData: KeyboardHealthFile = {
+    _type: "keyboard-health-record",
+    _version: "1.0.0",
+    userData: record
+  }
+
+  // 2. 处理文件名（防止非法字符）
+  const safeFileName = record.name.replace(/[<>:"/\\|?*]/g, "_")
+
+  const filePath = path.join(userDataPath, `${safeFileName}.json`)
+
+  try {
+    // 3. 防止覆盖（可选策略）
+    if (fs.existsSync(filePath)) {
+      console.warn(`[文件已存在] ${filePath}`)
+      return
+    }
+
+    // 4. 写入文件
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(fileData, null, 2),
+      "utf-8"
+    )
+
+    console.log(`[创建成功] ${filePath}`)
+  } catch (err) {
+    console.error(`[创建失败] ${filePath}`, err)
+  }
+}
+
+export function updateRecord(data){
+    console.log(data);
 }

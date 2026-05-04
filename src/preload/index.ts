@@ -5,6 +5,12 @@ import { electronAPI } from '@electron-toolkit/preload'
 const api = {
   getUserData(){
     return ipcRenderer.invoke('get-user-data')
+  },
+  createRecord(data: any){
+    return ipcRenderer.invoke('create-record',data)
+  },
+  updateRecord(data: any){
+    return ipcRenderer.invoke('update-record',data)
   }
 }
 
