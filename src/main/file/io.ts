@@ -69,6 +69,47 @@ export function createRecord(record: KeyboardHealthRecord) : void {
   }
 }
 
-export function updateRecord(data){
-    console.log(data);
+export function updateRecord(record: KeyboardHealthRecord): void {
+  const userDataPath = getUserDataPath()
+
+  const files = fs.readdirSync(userDataPath)
+
+  const jsonFiles = files
+    .filter(file => file.endsWith(".json"))
+    .map(file => path.join(userDataPath, file))
+
+  let found = false
+
+  for (const filePath of jsonFiles) {
+    try {
+      const content = fs.readFileSync(filePath, "utf-8")
+      const data: KeyboardHealthFile = JSON.parse(content)
+
+      if (!isValidKeyboardHealthFile(data)) continue
+
+      // ⭐ 核心匹配：用 id
+      if (data.userData.id === record.id) {
+        found = true
+
+        // 更新数据
+        data.userData = record
+
+        // 写回文件
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify(data, null, 2),
+          "utf-8"
+        )
+
+        console.log(`[更新成功] ${filePath}`)
+        break
+      }
+    } catch (err) {
+      console.warn(`[更新失败] ${filePath}`, err)
+    }
+  }
+
+  if (!found) {
+    console.warn(`[未找到记录] id=${record.id}`)
+  }
 }
