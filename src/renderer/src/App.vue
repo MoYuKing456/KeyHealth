@@ -191,8 +191,23 @@ const handleClickOutside = (event: MouseEvent) => {
   }
 }
 
+// 初始化用户数据
+const initUserData = async () => {
+  const userData = await window.api.getUserData()
+  for (const record of userData) {
+    records.value.push(record)
+  }
+  // 如果存在记录并且当前未选中任何记录，则默认选中第一个
+  if (records.value.length > 0 && !currentRecordId.value) {
+    currentRecordId.value = records.value[0].id
+  }
+}
+
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+
+  initUserData()
+
 })
 </script>
 
