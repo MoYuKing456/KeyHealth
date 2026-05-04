@@ -57,11 +57,11 @@ app.whenReady().then(() => {
   })
 
   // 创建记录的 IPC 处理器
-  ipcMain.handle('create-record', (event, data) => {
+  ipcMain.handle('create-record', (_event, data) => {
     return createRecord(data)
   })
 
-  ipcMain.handle('update-record', (event, data) => {
+  ipcMain.handle('update-record', (_event, data) => {
     return updateRecord(data)
   })
 

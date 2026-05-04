@@ -7,7 +7,18 @@ import type { KeyboardHealthRecord,KeyboardHealthFile } from "../validator/jsonV
 export function getUserData(): KeyboardHealthRecord[] {
   const userDataPath = getUserDataPath()
 
-  const files = fs.readdirSync(userDataPath)
+  if (!fs.existsSync(userDataPath)) {
+    fs.mkdirSync(userDataPath, { recursive: true })
+  }
+
+  let files: string[] = []
+
+  try {
+    files = fs.readdirSync(userDataPath)
+  } catch (err) {
+    console.warn(`[读取目录失败] ${userDataPath}`, err)
+    return []
+  }
 
   const jsonFiles = files
     .filter(file => file.endsWith(".json"))
@@ -20,7 +31,6 @@ export function getUserData(): KeyboardHealthRecord[] {
       const content = fs.readFileSync(filePath, "utf-8")
       const data = JSON.parse(content)
 
-      // 类型守卫校验
       if (isValidKeyboardHealthFile(data)) {
         result.push(data.userData)
       } else {
