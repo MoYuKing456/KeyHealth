@@ -3,19 +3,26 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { getUserData,createRecord,updateRecord } from './file/io'
+import { loadConfig, saveConfig } from './file/config'
 
 
 function createWindow(): void {
+  // 预读配置，获取主题（用于消除启动闪屏）
+  const config = loadConfig()
+  const isDark = config.theme === 'dark'
+
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 680,
     show: false,
     autoHideMenuBar: true,
+    backgroundColor: isDark ? '#0a0a0c' : '#f5f5f7',
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      additionalArguments: [`--app-theme=${config.theme}`]
     }
   })
 
@@ -63,6 +70,15 @@ app.whenReady().then(() => {
 
   ipcMain.handle('update-record', (_event, data) => {
     return updateRecord(data)
+  })
+
+  // 配置相关的 IPC 处理器
+  ipcMain.handle('get-config', () => {
+    return loadConfig()
+  })
+
+  ipcMain.handle('save-config', (_event, config) => {
+    return saveConfig(config)
   })
 
   createWindow()

@@ -1,20 +1,31 @@
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, watch, toRaw } from 'vue'
+import { ref, computed, reactive, onMounted, watch } from 'vue'
 import KeyboardView from './components/KeyboardView.vue'
 import CreateRecordModal from './components/CreateRecordModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import { KeyStatus, type KeyboardHealthRecord, type KeyHealth } from './types'
+import { keyboardLayout } from './data/keyboardLayout'
 
-// 主题 - 默认亮色
-const isDark = ref(false)
+// 主题 — 从预加载脚本同步初始状态（已由 index.html 内联脚本提前应用到 DOM）
+const isDark = ref(window.__INITIAL_THEME__ === 'dark')
 
 onMounted(() => {
-  // 初始化主题 - 默认亮色，不添加 dark 类
-  document.documentElement.classList.toggle('dark', isDark.value)
+  document.addEventListener('click', handleClickOutside)
+  initUserData()
 })
 
-watch(isDark, (dark) => {
+// 主题切换时持久化保存
+watch(isDark, async (dark) => {
   document.documentElement.classList.toggle('dark', dark)
+  try {
+    await window.api.saveConfig({
+      _type: 'app-config',
+      _version: '1.0.0',
+      theme: dark ? 'dark' : 'light'
+    })
+  } catch (err) {
+    console.warn('[主题] 保存配置失败', err)
+  }
 })
 
 // 所有键盘健康记录
@@ -36,6 +47,91 @@ const isDropdownOpen = ref(false)
 // 待保存的编辑记录
 const pendingChanges = reactive<Record<string, KeyHealth>>({})
 const hasChanges = ref(false)
+
+// 排行视图切换
+const showRanking = ref(false)
+
+// 构建 keyCode → label 的查找表
+const keyLabelMap = computed(() => {
+  const map: Record<string, string> = {}
+
+  // 收集所有按键定义的展平列表
+  const defs = [
+    ...keyboardLayout.functionRow.escape,
+    ...keyboardLayout.functionRow.f1_f4,
+    ...keyboardLayout.functionRow.f5_f8,
+    ...keyboardLayout.functionRow.f9_f12,
+    ...keyboardLayout.mainArea.flatMap(r => r.keys),
+    ...keyboardLayout.navigationFunctionRow,
+    ...keyboardLayout.navigationArea.flatMap(r => r.keys),
+    keyboardLayout.arrowKeys.up,
+    keyboardLayout.arrowKeys.down,
+    keyboardLayout.arrowKeys.left,
+    keyboardLayout.arrowKeys.right,
+    ...keyboardLayout.numpadFunctionRow,
+    ...keyboardLayout.numpadArea.row1,
+    ...keyboardLayout.numpadArea.row2,
+    ...keyboardLayout.numpadArea.row3,
+    ...keyboardLayout.numpadArea.row4,
+    keyboardLayout.numpadArea.plus,
+    keyboardLayout.numpadArea.enter,
+  ]
+
+  for (const key of defs) {
+    map[key.code] = key.label
+  }
+  return map
+})
+
+// 排行数据：按损坏次数降序排列
+const rankingData = computed(() => {
+  if (!currentRecord.value) return []
+
+  return Object.entries(displayKeys.value)
+    .filter(([_, health]) => health.history && health.history.length > 0)
+    .map(([keyCode, health]) => ({
+      keyCode,
+      label: getRankingLabel(keyCode, keyLabelMap.value[keyCode] || keyCode),
+      count: health.history.length,
+      status: health.status
+    }))
+    .sort((a, b) => b.count - a.count)
+})
+
+/**
+ * 为排行视图生成可区分的标签（区分左右键、小键盘等）
+ */
+function getRankingLabel(keyCode: string, baseLabel: string): string {
+  // ShiftLeft / ShiftRight → Shift L / Shift R
+  if (keyCode === 'ShiftLeft') return 'Shift L'
+  if (keyCode === 'ShiftRight') return 'Shift R'
+  // ControlLeft / ControlRight → Ctrl L / Ctrl R
+  if (keyCode === 'ControlLeft') return 'Ctrl L'
+  if (keyCode === 'ControlRight') return 'Ctrl R'
+  // AltLeft / AltRight → Alt L / Alt R
+  if (keyCode === 'AltLeft') return 'Alt L'
+  if (keyCode === 'AltRight') return 'Alt R'
+  // MetaLeft / MetaRight → Win L / Win R
+  if (keyCode === 'MetaLeft') return 'Win L'
+  if (keyCode === 'MetaRight') return 'Win R'
+  // 小键盘数字
+  if (/^Numpad\d$/.test(keyCode)) return `Num ${keyCode.slice(-1)}`
+  // 小键盘运算符
+  if (keyCode === 'NumpadAdd') return 'Num +'
+  if (keyCode === 'NumpadSubtract') return 'Num -'
+  if (keyCode === 'NumpadMultiply') return 'Num *'
+  if (keyCode === 'NumpadDivide') return 'Num /'
+  if (keyCode === 'NumpadDecimal') return 'Num .'
+  if (keyCode === 'NumpadEnter') return 'Num Enter'
+  // 默认使用基础标签
+  return baseLabel
+}
+
+// 排行最大值（用于比例计算）
+const maxRankCount = computed(() => {
+  if (rankingData.value.length === 0) return 1
+  return rankingData.value[0].count
+})
 
 // 当前选中的记录
 const currentRecord = computed(() => {
@@ -78,6 +174,9 @@ const toggleEditMode = () => {
     showConfirmModal.value = true
   } else {
     isEditMode.value = !isEditMode.value
+    if (isEditMode.value) {
+      showRanking.value = false  // 编辑模式自动关闭排行
+    }
     if (!isEditMode.value) {
       Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
       hasChanges.value = false
@@ -97,25 +196,38 @@ const handleKeyClick = (keyCode: string) => {
   let newHealth: KeyHealth
 
   if (currentStatus === KeyStatus.HEALTHY) {
+    // 健康 → 损坏：新增一条损坏事件到历史
     newStatus = KeyStatus.DAMAGED
     newHealth = {
       keyCode,
       status: newStatus,
-      damagedAt: now
+      history: [{ damagedAt: now }]
     }
   } else if (currentStatus === KeyStatus.DAMAGED) {
+    // 损坏 → 已更换：更新最后一条未更换的事件
     newStatus = KeyStatus.REPLACED
+    const history = [...(currentKeyHealth?.history || [])]
+    // 找到最后一个没有 replacedAt 的事件，设置更换时间
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (!history[i].replacedAt) {
+        history[i] = { ...history[i], replacedAt: now }
+        break
+      }
+    }
     newHealth = {
       keyCode,
       status: newStatus,
-      damagedAt: currentKeyHealth?.damagedAt,
-      replacedAt: now
+      history
     }
   } else {
-    newStatus = KeyStatus.HEALTHY
+    // REPLACED → DAMAGED（二次损坏）：追加新的损坏事件，保留历史
+    newStatus = KeyStatus.DAMAGED
+    const history = [...(currentKeyHealth?.history || [])]
+    history.push({ damagedAt: now })
     newHealth = {
       keyCode,
-      status: newStatus
+      status: newStatus,
+      history
     }
   }
 
@@ -124,20 +236,36 @@ const handleKeyClick = (keyCode: string) => {
 }
 
 // 保存更改
-const saveChanges = () => {
-  if (!currentRecord.value) return
+const saveChanges = async () => {
+  if (!currentRecord.value) {
+    showConfirmModal.value = false
+    return
+  }
 
-  Object.entries(pendingChanges).forEach(([keyCode, health]) => {
-    if (health.status === KeyStatus.HEALTHY) {
-      delete currentRecord.value!.keys[keyCode]
-    } else {
-      currentRecord.value!.keys[keyCode] = health
-    }
-  })
-  currentRecord.value.updatedAt = new Date().toISOString()
+  try {
+    // 1. 将待保存的更改应用到当前记录
+    Object.entries(pendingChanges).forEach(([keyCode, health]) => {
+      if (health.status === KeyStatus.HEALTHY) {
+        delete currentRecord.value!.keys[keyCode]
+      } else {
+        currentRecord.value!.keys[keyCode] = health
+      }
+    })
+    currentRecord.value.updatedAt = new Date().toISOString()
 
-  window.api.updateRecord(toRaw(currentRecord.value))
+    // 2. 深拷贝确保 IPC 序列化安全（去掉 Vue 响应式代理）
+    const payload = JSON.parse(JSON.stringify(currentRecord.value))
+    await window.api.updateRecord(payload)
 
+    console.log('[保存成功]')
+  } catch (err) {
+    console.error('[保存失败]', err)
+    // 保存失败时保持编辑模式，让用户可以重试
+    showConfirmModal.value = false
+    return
+  }
+
+  // 3. 保存成功后清理状态
   Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
   hasChanges.value = false
   isEditMode.value = false
@@ -154,16 +282,19 @@ const discardChanges = () => {
 
 // 获取更改摘要
 const changesSummary = computed(() => {
-  const changes: { damaged: string[], replaced: string[], healed: string[] } = {
+  const changes: { damaged: string[], redamaged: string[], replaced: string[], healed: string[] } = {
     damaged: [],
+    redamaged: [],
     replaced: [],
     healed: []
   }
 
   Object.entries(pendingChanges).forEach(([keyCode, health]) => {
     const originalStatus = currentRecord.value?.keys[keyCode]?.status || KeyStatus.HEALTHY
-    if (health.status === KeyStatus.DAMAGED && originalStatus !== KeyStatus.DAMAGED) {
+    if (health.status === KeyStatus.DAMAGED && originalStatus === KeyStatus.HEALTHY) {
       changes.damaged.push(keyCode)
+    } else if (health.status === KeyStatus.DAMAGED && originalStatus === KeyStatus.REPLACED) {
+      changes.redamaged.push(keyCode)
     } else if (health.status === KeyStatus.REPLACED && originalStatus !== KeyStatus.REPLACED) {
       changes.replaced.push(keyCode)
     } else if (health.status === KeyStatus.HEALTHY && originalStatus !== KeyStatus.HEALTHY) {
@@ -205,13 +336,6 @@ const initUserData = async () => {
     currentRecordId.value = records.value[0].id
   }
 }
-
-onMounted(() => {
-  document.addEventListener('click', handleClickOutside)
-
-  initUserData()
-
-})
 </script>
 
 <template>
@@ -265,6 +389,21 @@ onMounted(() => {
 
         <!-- 右侧：主题切换 + 操作按钮 -->
         <div class="header-right">
+          <!-- 排行切换 -->
+          <button
+            class="theme-toggle"
+            :class="{ 'toggle-active': showRanking }"
+            :title="showRanking ? '返回键盘视图' : '查看损坏排行'"
+            :disabled="isEditMode"
+            @click="showRanking = !showRanking"
+          >
+            <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="20" x2="18" y2="10" />
+              <line x1="12" y1="20" x2="12" y2="4" />
+              <line x1="6" y1="20" x2="6" y2="14" />
+            </svg>
+          </button>
+
           <!-- 主题切换 -->
           <button class="theme-toggle" @click="isDark = !isDark" :title="isDark ? '切换到亮色模式' : '切换到暗色模式'">
             <svg v-if="isDark" class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -361,7 +500,7 @@ onMounted(() => {
       <!-- 有键盘时的内容 -->
       <template v-else>
         <!-- 状态统计和图例 -->
-        <div class="info-bar">
+        <div v-if="!showRanking" class="info-bar">
           <div class="legend">
             <div class="legend-item">
               <div class="legend-dot healthy"></div>
@@ -395,8 +534,43 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 键盘视图 -->
-        <KeyboardView :keys="displayKeys" :is-edit-mode="isEditMode" @key-click="handleKeyClick" />
+        <!-- 键盘视图 / 排行视图 -->
+        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode" @key-click="handleKeyClick" />
+
+        <!-- 损坏排行柱状图 -->
+        <div v-else class="ranking-view">
+          <div class="ranking-header">
+            <h3 class="ranking-title">按键损坏排行</h3>
+            <span class="ranking-subtitle">按累计损坏次数降序排列</span>
+          </div>
+
+          <div v-if="rankingData.length === 0" class="ranking-empty">
+            <svg class="ranking-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p>暂无损坏记录</p>
+          </div>
+
+          <div v-else class="ranking-list">
+            <div
+              v-for="(item, idx) in rankingData"
+              :key="item.keyCode"
+              class="ranking-row"
+            >
+              <span class="ranking-index" :class="{ 'top-three': idx < 3 }">{{ idx + 1 }}</span>
+              <span class="ranking-key-label" :title="item.label">{{ item.label }}</span>
+              <div class="ranking-bar-track">
+                <div
+                  class="ranking-bar-fill"
+                  :class="item.status === 'replaced' ? 'bar-replaced' : 'bar-damaged'"
+                  :style="{ width: (item.count / maxRankCount * 100) + '%' }"
+                >
+                  <span class="ranking-bar-count">{{ item.count }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </template>
 
       <!-- 当前记录信息 -->
@@ -924,5 +1098,132 @@ onMounted(() => {
 .btn-lg {
   padding: 12px 24px;
   font-size: 16px;
+}
+
+/* 排行按钮激活态 */
+.toggle-active {
+  background: var(--color-accent-light) !important;
+  border-color: var(--color-accent) !important;
+}
+
+.toggle-active .theme-icon {
+  color: var(--color-accent);
+}
+
+/* ========== 排行视图 ========== */
+.ranking-view {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ranking-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ranking-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.ranking-subtitle {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.ranking-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 48px 24px;
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+.ranking-empty-icon {
+  width: 40px;
+  height: 40px;
+  opacity: 0.5;
+}
+
+.ranking-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ranking-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+}
+
+.ranking-index {
+  width: 24px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.ranking-index.top-three {
+  color: var(--color-accent);
+}
+
+.ranking-key-label {
+  width: 80px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  flex-shrink: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-bar-track {
+  flex: 1;
+  height: 22px;
+  background: var(--color-background);
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+
+.ranking-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 32px;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.bar-damaged {
+  background: linear-gradient(90deg, #ef4444 0%, #dc2626 100%);
+}
+
+.bar-replaced {
+  background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);
+}
+
+.ranking-bar-count {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  padding-right: 6px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 </style>

@@ -3,6 +3,7 @@ defineProps<{
   title: string
   changes: {
     damaged: string[]
+    redamaged: string[]
     replaced: string[]
     healed: string[]
   }
@@ -60,6 +61,18 @@ const handleBackdropClick = (e: MouseEvent) => {
                   </div>
                 </div>
                 
+                <div v-if="changes.redamaged.length > 0" class="change-item">
+                  <div class="change-badge redamaged">
+                    <span class="badge-dot"></span>
+                    再次损坏
+                  </div>
+                  <span class="change-count">{{ changes.redamaged.length }} 个按键</span>
+                  <div class="change-keys">
+                    {{ changes.redamaged.slice(0, 5).join(', ') }}
+                    <span v-if="changes.redamaged.length > 5">...</span>
+                  </div>
+                </div>
+                
                 <div v-if="changes.replaced.length > 0" class="change-item">
                   <div class="change-badge replaced">
                     <span class="badge-dot"></span>
@@ -84,7 +97,7 @@ const handleBackdropClick = (e: MouseEvent) => {
                   </div>
                 </div>
 
-                <p v-if="changes.damaged.length === 0 && changes.replaced.length === 0 && changes.healed.length === 0" 
+                <p v-if="changes.damaged.length === 0 && changes.redamaged.length === 0 && changes.replaced.length === 0 && changes.healed.length === 0" 
                    class="no-changes">
                   无更改
                 </p>
@@ -225,6 +238,11 @@ const handleBackdropClick = (e: MouseEvent) => {
 .change-badge.damaged {
   background: var(--color-damaged-light);
   color: #f87171;
+}
+
+.change-badge.redamaged {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
 }
 
 .change-badge.replaced {

@@ -5,12 +5,17 @@ export enum KeyStatus {
   REPLACED = 'replaced'
 }
 
-// 单个按键的健康信息
+// 单次损坏事件（一次损坏→更换的完整记录）
+export interface DamageEvent {
+  damagedAt: string   // ISO 日期字符串，损坏时间
+  replacedAt?: string // ISO 日期字符串，更换时间（未更换则为 undefined）
+}
+
+// 单个按键的健康信息（支持多次损坏历史）
 export interface KeyHealth {
   keyCode: string
   status: KeyStatus
-  damagedAt?: string  // ISO 日期字符串
-  replacedAt?: string // ISO 日期字符串
+  history: DamageEvent[]  // 所有损坏事件，按时间顺序排列；HEALTHY 时为空数组
 }
 
 // 键盘健康记录表

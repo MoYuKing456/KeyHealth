@@ -6,11 +6,17 @@
   <title>键盘健康状态记录工具</title>
   <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
 </head>
 
 <body>
   <div id="app"></div>
+  <!-- 内联脚本：在 Vue 挂载前立即应用主题，消除启动闪屏 -->
+  <script>
+    if (window.__INITIAL_THEME__ === 'dark') {
+      document.documentElement.classList.add('dark');
+    }
+  </script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 
