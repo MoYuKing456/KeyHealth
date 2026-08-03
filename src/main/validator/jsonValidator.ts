@@ -1,7 +1,10 @@
 // 单次损坏事件
 export interface DamageEvent {
   damagedAt: string
+  damageType?: 'normal' | 'swap'
   replacedAt?: string
+  replacementType?: 'normal' | 'swap'
+  swapWithKeyCode?: string
 }
 
 export interface KeyboardHealthRecord {
@@ -72,10 +75,12 @@ export function migrateKeyHealth(legacy: any): { keyCode: string; status: string
   if (legacy.damagedAt || legacy.replacedAt) {
     const event: DamageEvent = {
       // damagedAt 缺失时用 replacedAt 回退（旧数据可能只记录了更换时间）
-      damagedAt: legacy.damagedAt || legacy.replacedAt
+      damagedAt: legacy.damagedAt || legacy.replacedAt,
+      damageType: 'normal'
     }
     if (legacy.replacedAt) {
       event.replacedAt = legacy.replacedAt
+      event.replacementType = 'normal'
     }
     history.push(event)
   }
@@ -85,4 +90,25 @@ export function migrateKeyHealth(legacy: any): { keyCode: string; status: string
     status: legacy.status,
     history
   }
+}
+
+/**
+ * 为旧 history 记录补齐事件类型。缺失或非法类型都按旧版“普通操作”处理。
+ * 返回是否产生修改，供调用方决定是否写回文件。
+ */
+export function normalizeKeyHealthEventTypes(keyHealth: any): boolean {
+  if (!keyHealth || !Array.isArray(keyHealth.history)) return false
+
+  let changed = false
+  for (const event of keyHealth.history) {
+    if (event.damageType !== 'normal' && event.damageType !== 'swap') {
+      event.damageType = 'normal'
+      changed = true
+    }
+    if (event.replacedAt && event.replacementType !== 'normal' && event.replacementType !== 'swap') {
+      event.replacementType = 'normal'
+      changed = true
+    }
+  }
+  return changed
 }

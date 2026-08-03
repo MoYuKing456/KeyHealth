@@ -3,7 +3,7 @@ import { ref, computed, reactive, onMounted, watch } from 'vue'
 import KeyboardView from './components/KeyboardView.vue'
 import CreateRecordModal from './components/CreateRecordModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
-import { KeyStatus, type KeyboardHealthRecord, type KeyHealth } from './types'
+import { EventType, KeyStatus, type KeyboardHealthRecord, type KeyHealth } from './types'
 import { keyboardLayout } from './data/keyboardLayout'
 
 // 主题 — 从预加载脚本同步初始状态（已由 index.html 内联脚本提前应用到 DOM）
@@ -14,18 +14,24 @@ onMounted(() => {
   initUserData()
 })
 
-// 主题切换时持久化保存
-watch(isDark, async (dark) => {
-  document.documentElement.classList.toggle('dark', dark)
+// 持久化应用配置（主题 + 上次选中的记录），两者一起保存避免互相覆盖
+const saveAppConfig = async () => {
   try {
     await window.api.saveConfig({
       _type: 'app-config',
       _version: '1.0.0',
-      theme: dark ? 'dark' : 'light'
+      theme: isDark.value ? 'dark' : 'light',
+      lastRecordId: currentRecordId.value
     })
   } catch (err) {
-    console.warn('[主题] 保存配置失败', err)
+    console.warn('[配置] 保存配置失败', err)
   }
+}
+
+// 主题切换时持久化保存
+watch(isDark, (dark) => {
+  document.documentElement.classList.toggle('dark', dark)
+  saveAppConfig()
 })
 
 // 所有键盘健康记录
@@ -47,6 +53,15 @@ const isDropdownOpen = ref(false)
 // 待保存的编辑记录
 const pendingChanges = reactive<Record<string, KeyHealth>>({})
 const hasChanges = ref(false)
+
+// 本次编辑会话的操作日志：每次点击/换轴都记录一条，用于保存时的修改概要，
+// 避免同一按键多次操作被最终状态覆盖（如 损坏→更换→再次损坏 只显示最后一种）。
+type ChangeType = 'damaged' | 'redamaged' | 'replaced' | 'healed'
+interface ChangeOp {
+  keyCode: string
+  type: ChangeType
+}
+const changeLog = ref<ChangeOp[]>([])
 
 // 排行视图切换
 const showRanking = ref(false)
@@ -160,12 +175,14 @@ const handleCreateRecord = (name: string) => {
   records.value.push(newRecord)
   currentRecordId.value = newRecord.id
   showCreateModal.value = false
+  saveAppConfig()
 }
 
 // 选择记录
 const selectRecord = (id: string) => {
   currentRecordId.value = id
   isDropdownOpen.value = false
+  saveAppConfig()
 }
 
 // 切换编辑模式
@@ -179,6 +196,7 @@ const toggleEditMode = () => {
     }
     if (!isEditMode.value) {
       Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
+      changeLog.value = []
       hasChanges.value = false
     }
   }
@@ -194,23 +212,26 @@ const handleKeyClick = (keyCode: string) => {
 
   let newStatus: KeyStatus
   let newHealth: KeyHealth
+  let changeType: ChangeType
 
   if (currentStatus === KeyStatus.HEALTHY) {
     // 健康 → 损坏：新增一条损坏事件到历史
     newStatus = KeyStatus.DAMAGED
+    changeType = 'damaged'
     newHealth = {
       keyCode,
       status: newStatus,
-      history: [{ damagedAt: now }]
+      history: [{ damagedAt: now, damageType: EventType.NORMAL }]
     }
   } else if (currentStatus === KeyStatus.DAMAGED) {
     // 损坏 → 已更换：更新最后一条未更换的事件
     newStatus = KeyStatus.REPLACED
+    changeType = 'replaced'
     const history = [...(currentKeyHealth?.history || [])]
     // 找到最后一个没有 replacedAt 的事件，设置更换时间
     for (let i = history.length - 1; i >= 0; i--) {
       if (!history[i].replacedAt) {
-        history[i] = { ...history[i], replacedAt: now }
+        history[i] = { ...history[i], replacedAt: now, replacementType: EventType.NORMAL }
         break
       }
     }
@@ -222,8 +243,9 @@ const handleKeyClick = (keyCode: string) => {
   } else {
     // REPLACED → DAMAGED（二次损坏）：追加新的损坏事件，保留历史
     newStatus = KeyStatus.DAMAGED
+    changeType = 'redamaged'
     const history = [...(currentKeyHealth?.history || [])]
-    history.push({ damagedAt: now })
+    history.push({ damagedAt: now, damageType: EventType.NORMAL })
     newHealth = {
       keyCode,
       status: newStatus,
@@ -232,6 +254,64 @@ const handleKeyClick = (keyCode: string) => {
   }
 
   pendingChanges[keyCode] = newHealth
+  changeLog.value.push({ keyCode, type: changeType })
+  hasChanges.value = true
+}
+
+/**
+ * 换轴按“键位维修”记录，而不是交换两颗实体轴的履历：
+ * - 来源键位保留自己的历史，并新增一次损坏：原目标的损坏轴被装到了这里；
+ * - 目标损坏键位保留自己的所有历史，并将最后一次未更换损坏标记为已更换。
+ * 这样每个键位的损坏次数和更换次数始终属于该键位，不会因换轴而调换或合并。
+ */
+const handleSwitchMove = (sourceKeyCode: string, targetKeyCode: string) => {
+  if (!isEditMode.value || sourceKeyCode === targetKeyCode) return
+
+  const source = pendingChanges[sourceKeyCode] || currentRecord.value?.keys[sourceKeyCode]
+  const target = pendingChanges[targetKeyCode] || currentRecord.value?.keys[targetKeyCode]
+  const sourceStatus = source?.status || KeyStatus.HEALTHY
+
+  if ((sourceStatus !== KeyStatus.HEALTHY && sourceStatus !== KeyStatus.REPLACED) || target?.status !== KeyStatus.DAMAGED) {
+    return
+  }
+
+  const replacedAt = new Date().toISOString()
+  const targetHistory = target.history.map(event => ({ ...event }))
+  // 损坏状态一定至少有一条未完成的损坏事件；倒序处理以确保补全最近一次。
+  for (let index = targetHistory.length - 1; index >= 0; index--) {
+    if (!targetHistory[index].replacedAt) {
+      targetHistory[index] = {
+        ...targetHistory[index],
+        replacedAt,
+        replacementType: EventType.SWAP,
+        swapWithKeyCode: sourceKeyCode
+      }
+      break
+    }
+  }
+
+  // 损坏轴被装到来源键位：保留来源键位既有履历，再追加本次损坏。
+  const sourceHistory = source?.history.map(event => ({ ...event })) || []
+  sourceHistory.push({
+    damagedAt: replacedAt,
+    damageType: EventType.SWAP,
+    swapWithKeyCode: targetKeyCode
+  })
+  pendingChanges[sourceKeyCode] = {
+    keyCode: sourceKeyCode,
+    status: KeyStatus.DAMAGED,
+    history: sourceHistory
+  }
+  pendingChanges[targetKeyCode] = {
+    keyCode: targetKeyCode,
+    status: KeyStatus.REPLACED,
+    history: targetHistory
+  }
+  // 换轴涉及两个键位：来源键损坏/再次损坏，目标键更换
+  changeLog.value.push(
+    { keyCode: sourceKeyCode, type: sourceStatus === KeyStatus.HEALTHY ? 'damaged' : 'redamaged' },
+    { keyCode: targetKeyCode, type: 'replaced' }
+  )
   hasChanges.value = true
 }
 
@@ -267,6 +347,7 @@ const saveChanges = async () => {
 
   // 3. 保存成功后清理状态
   Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
+  changeLog.value = []
   hasChanges.value = false
   isEditMode.value = false
   showConfirmModal.value = false
@@ -275,31 +356,23 @@ const saveChanges = async () => {
 // 放弃更改
 const discardChanges = () => {
   Object.keys(pendingChanges).forEach(key => delete pendingChanges[key])
+  changeLog.value = []
   hasChanges.value = false
   isEditMode.value = false
   showConfirmModal.value = false
 }
 
-// 获取更改摘要
+// 获取更改摘要（按操作日志逐条汇总，保留同键多次操作的每一次记录）
 const changesSummary = computed(() => {
-  const changes: { damaged: string[], redamaged: string[], replaced: string[], healed: string[] } = {
+  const changes: Record<ChangeType, string[]> = {
     damaged: [],
     redamaged: [],
     replaced: [],
     healed: []
   }
 
-  Object.entries(pendingChanges).forEach(([keyCode, health]) => {
-    const originalStatus = currentRecord.value?.keys[keyCode]?.status || KeyStatus.HEALTHY
-    if (health.status === KeyStatus.DAMAGED && originalStatus === KeyStatus.HEALTHY) {
-      changes.damaged.push(keyCode)
-    } else if (health.status === KeyStatus.DAMAGED && originalStatus === KeyStatus.REPLACED) {
-      changes.redamaged.push(keyCode)
-    } else if (health.status === KeyStatus.REPLACED && originalStatus !== KeyStatus.REPLACED) {
-      changes.replaced.push(keyCode)
-    } else if (health.status === KeyStatus.HEALTHY && originalStatus !== KeyStatus.HEALTHY) {
-      changes.healed.push(keyCode)
-    }
+  changeLog.value.forEach(op => {
+    changes[op.type].push(op.keyCode)
   })
 
   return changes
@@ -331,9 +404,21 @@ const initUserData = async () => {
   for (const record of userData) {
     records.value.push(record)
   }
-  // 如果存在记录并且当前未选中任何记录，则默认选中第一个
-  if (records.value.length > 0 && !currentRecordId.value) {
-    currentRecordId.value = records.value[0].id
+
+  if (records.value.length > 0) {
+    // 读取配置，优先恢复上次退出时选中的记录；不存在或已删除时回退到第一条
+    let lastRecordId = ''
+    try {
+      const config = await window.api.getConfig()
+      lastRecordId = config?.lastRecordId || ''
+    } catch (err) {
+      console.warn('[配置] 读取配置失败', err)
+    }
+
+    const target = lastRecordId && records.value.some(r => r.id === lastRecordId)
+      ? lastRecordId
+      : records.value[0].id
+    currentRecordId.value = target
   }
 }
 </script>
@@ -390,13 +475,8 @@ const initUserData = async () => {
         <!-- 右侧：主题切换 + 操作按钮 -->
         <div class="header-right">
           <!-- 排行切换 -->
-          <button
-            class="theme-toggle"
-            :class="{ 'toggle-active': showRanking }"
-            :title="showRanking ? '返回键盘视图' : '查看损坏排行'"
-            :disabled="isEditMode"
-            @click="showRanking = !showRanking"
-          >
+          <button class="theme-toggle" :class="{ 'toggle-active': showRanking }"
+            :title="showRanking ? '返回键盘视图' : '查看损坏排行'" :disabled="isEditMode" @click="showRanking = !showRanking">
             <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="20" x2="18" y2="10" />
               <line x1="12" y1="20" x2="12" y2="4" />
@@ -466,7 +546,7 @@ const initUserData = async () => {
             </div>
             <div class="edit-banner-text">
               <span class="edit-banner-title">编辑模式已开启</span>
-              <span class="edit-banner-desc">点击按键循环切换状态：健康 → 损坏 → 更换 → 健康</span>
+              <span class="edit-banner-desc">点击按键循环切换状态；长按健康或已更换轴拖到损坏轴，会记录目标更换与来源损坏</span>
             </div>
           </div>
         </div>
@@ -535,7 +615,8 @@ const initUserData = async () => {
         </div>
 
         <!-- 键盘视图 / 排行视图 -->
-        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode" @key-click="handleKeyClick" />
+        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode" @key-click="handleKeyClick"
+          @switch-move="handleSwitchMove" />
 
         <!-- 损坏排行柱状图 -->
         <div v-else class="ranking-view">
@@ -552,19 +633,12 @@ const initUserData = async () => {
           </div>
 
           <div v-else class="ranking-list">
-            <div
-              v-for="(item, idx) in rankingData"
-              :key="item.keyCode"
-              class="ranking-row"
-            >
+            <div v-for="(item, idx) in rankingData" :key="item.keyCode" class="ranking-row">
               <span class="ranking-index" :class="{ 'top-three': idx < 3 }">{{ idx + 1 }}</span>
               <span class="ranking-key-label" :title="item.label">{{ item.label }}</span>
               <div class="ranking-bar-track">
-                <div
-                  class="ranking-bar-fill"
-                  :class="item.status === 'replaced' ? 'bar-replaced' : 'bar-damaged'"
-                  :style="{ width: (item.count / maxRankCount * 100) + '%' }"
-                >
+                <div class="ranking-bar-fill" :class="item.status === 'replaced' ? 'bar-replaced' : 'bar-damaged'"
+                  :style="{ width: (item.count / maxRankCount * 100) + '%' }">
                   <span class="ranking-bar-count">{{ item.count }}</span>
                 </div>
               </div>

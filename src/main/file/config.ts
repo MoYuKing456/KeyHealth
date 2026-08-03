@@ -7,13 +7,16 @@ export interface AppConfig {
   _type: "app-config"
   _version: string
   theme: "light" | "dark"
+  // 上次选中的键盘记录 ID（启动时恢复）
+  lastRecordId?: string
 }
 
 // 默认配置（亮色主题）
 const DEFAULT_CONFIG: AppConfig = {
   _type: "app-config",
   _version: "1.0.0",
-  theme: "light"
+  theme: "light",
+  lastRecordId: ""
 }
 
 // 配置文件路径

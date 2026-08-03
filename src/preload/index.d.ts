@@ -4,6 +4,7 @@ interface AppConfig {
   _type: string
   _version: string
   theme: 'light' | 'dark'
+  lastRecordId?: string
 }
 
 declare global {

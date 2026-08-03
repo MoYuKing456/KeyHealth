@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 defineProps<{
   title: string
   changes: {
@@ -15,6 +17,24 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
+// 每种变更类型的展示配置
+const changeTypes = [
+  { key: 'damaged', label: '损坏', badgeClass: 'damaged' },
+  { key: 'redamaged', label: '再次损坏', badgeClass: 'redamaged' },
+  { key: 'replaced', label: '更换', badgeClass: 'replaced' },
+  { key: 'healed', label: '恢复', badgeClass: 'healed' }
+] as const
+
+// 折叠状态下最多直接展示的条数
+const VISIBLE_LIMIT = 5
+
+// 各类型的展开状态（超出上限时可展开查看完整列表）
+const expanded = ref<Record<string, boolean>>({})
+
+const toggleExpand = (key: string) => {
+  expanded.value[key] = !expanded.value[key]
+}
+
 const handleBackdropClick = (e: MouseEvent) => {
   if (e.target === e.currentTarget) {
     emit('cancel')
@@ -24,17 +44,15 @@ const handleBackdropClick = (e: MouseEvent) => {
 
 <template>
   <Teleport to="body">
-    <div 
-      class="modal-overlay"
-      @click="handleBackdropClick"
-    >
+    <div class="modal-overlay" @click="handleBackdropClick">
       <Transition name="modal" appear>
         <div class="modal-container">
           <!-- Header -->
           <div class="modal-header">
             <div class="modal-icon warning">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                <path
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
             <div class="modal-title-group">
@@ -47,58 +65,34 @@ const handleBackdropClick = (e: MouseEvent) => {
           <div class="modal-body">
             <div class="changes-summary">
               <p class="summary-label">本次编辑摘要</p>
-              
+
               <div class="changes-list">
-                <div v-if="changes.damaged.length > 0" class="change-item">
-                  <div class="change-badge damaged">
+                <div v-for="item in changeTypes" :key="item.key" v-show="changes[item.key].length > 0"
+                  class="change-item">
+                  <div class="change-badge" :class="item.badgeClass">
                     <span class="badge-dot"></span>
-                    损坏
+                    {{ item.label }}
                   </div>
-                  <span class="change-count">{{ changes.damaged.length }} 个按键</span>
+                  <span class="change-count">{{ changes[item.key].length }} 次操作</span>
                   <div class="change-keys">
-                    {{ changes.damaged.slice(0, 5).join(', ') }}
-                    <span v-if="changes.damaged.length > 5">...</span>
-                  </div>
-                </div>
-                
-                <div v-if="changes.redamaged.length > 0" class="change-item">
-                  <div class="change-badge redamaged">
-                    <span class="badge-dot"></span>
-                    再次损坏
-                  </div>
-                  <span class="change-count">{{ changes.redamaged.length }} 个按键</span>
-                  <div class="change-keys">
-                    {{ changes.redamaged.slice(0, 5).join(', ') }}
-                    <span v-if="changes.redamaged.length > 5">...</span>
-                  </div>
-                </div>
-                
-                <div v-if="changes.replaced.length > 0" class="change-item">
-                  <div class="change-badge replaced">
-                    <span class="badge-dot"></span>
-                    更换
-                  </div>
-                  <span class="change-count">{{ changes.replaced.length }} 个按键</span>
-                  <div class="change-keys">
-                    {{ changes.replaced.slice(0, 5).join(', ') }}
-                    <span v-if="changes.replaced.length > 5">...</span>
-                  </div>
-                </div>
-                
-                <div v-if="changes.healed.length > 0" class="change-item">
-                  <div class="change-badge healed">
-                    <span class="badge-dot"></span>
-                    恢复
-                  </div>
-                  <span class="change-count">{{ changes.healed.length }} 个按键</span>
-                  <div class="change-keys">
-                    {{ changes.healed.slice(0, 5).join(', ') }}
-                    <span v-if="changes.healed.length > 5">...</span>
+                    <template v-if="!expanded[item.key]">
+                      {{ changes[item.key].slice(0, VISIBLE_LIMIT).join(', ') }}
+                    </template>
+                    <div v-else class="change-keys-full">
+                      <span v-for="(keyCode, idx) in changes[item.key]" :key="idx" class="key-chip">{{ keyCode }}</span>
+                    </div>
+                    <button v-if="changes[item.key].length > VISIBLE_LIMIT" class="change-toggle"
+                      :class="{ 'expanded': expanded[item.key] }" @click.stop="toggleExpand(item.key)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                      </svg>
+                      {{ expanded[item.key] ? '收起' : `查看全部 ${changes[item.key].length} 条` }}
+                    </button>
                   </div>
                 </div>
 
-                <p v-if="changes.damaged.length === 0 && changes.redamaged.length === 0 && changes.replaced.length === 0 && changes.healed.length === 0" 
-                   class="no-changes">
+                <p v-if="changes.damaged.length === 0 && changes.redamaged.length === 0 && changes.replaced.length === 0 && changes.healed.length === 0"
+                  class="no-changes">
                   无更改
                 </p>
               </div>
@@ -142,7 +136,7 @@ const handleBackdropClick = (e: MouseEvent) => {
   border-radius: 16px;
   width: 100%;
   max-width: 440px;
-  box-shadow: 
+  box-shadow:
     0 25px 50px -12px rgba(0, 0, 0, 0.5),
     0 0 0 1px rgba(255, 255, 255, 0.03);
   overflow: hidden;
@@ -273,6 +267,57 @@ const handleBackdropClick = (e: MouseEvent) => {
   color: var(--color-text-muted);
   padding-left: 16px;
   font-family: monospace;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* 展开后的完整列表：标签块形式展示，过长时可滚动 */
+.change-keys-full {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.key-chip {
+  padding: 2px 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.change-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--color-accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+.change-toggle:hover {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.change-toggle svg {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.2s;
+}
+
+.change-toggle.expanded svg {
+  transform: rotate(180deg);
 }
 
 .no-changes {

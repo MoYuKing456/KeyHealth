@@ -5,10 +5,19 @@ export enum KeyStatus {
   REPLACED = 'replaced'
 }
 
+// 事件来源：旧版本未记录类型的事件会在加载时迁移为 NORMAL
+export enum EventType {
+  NORMAL = 'normal',
+  SWAP = 'swap'
+}
+
 // 单次损坏事件（一次损坏→更换的完整记录）
 export interface DamageEvent {
   damagedAt: string   // ISO 日期字符串，损坏时间
+  damageType?: EventType // 普通损坏或由调换造成的损坏
   replacedAt?: string // ISO 日期字符串，更换时间（未更换则为 undefined）
+  replacementType?: EventType // 普通更换或通过调换完成的更换
+  swapWithKeyCode?: string // 调换事件的另一端键位；旧数据可能缺失
 }
 
 // 单个按键的健康信息（支持多次损坏历史）

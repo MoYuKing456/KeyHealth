@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, onMounted, onUnmounted } from 'vue'
-import { KeyStatus, type KeyDefinition, type KeyHealth } from '../types'
+import { computed, ref, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { EventType, KeyStatus, type DamageEvent, type KeyDefinition, type KeyHealth } from '../types'
 
 const props = defineProps<{
   keyDef: KeyDefinition
@@ -63,8 +63,30 @@ const scrollHistoryToBottom = async () => {
   }
 }
 
+// 编辑模式下状态切换会让 v-if/v-else-if 重建历史列表 DOM、滚动位置重置到顶部。
+// 这里在键位数据变化后自动滚动到底部，保证窗口始终展示最新记录。
+watch(
+  () => props.keyHealth,
+  () => {
+    if (tooltipVisible.value) {
+      scrollHistoryToBottom()
+    }
+  },
+  { deep: true }
+)
+
 // 按键点击处理
-const handleClick = () => {
+const handleClick = (event: MouseEvent) => {
+  const button = event.currentTarget as HTMLButtonElement
+  // 仅忽略本次长按拖动所产生的 click；标记挂在具体按钮上，不会影响下一次普通点击。
+  if (button.dataset.ignoreNextClick === 'true') {
+    delete button.dataset.ignoreNextClick
+    return
+  }
+
+  // 长按拖动换轴结束时，由 KeyboardView 阻止这次合成 click，避免误触发状态循环。
+  if (event.defaultPrevented) return
+
   if (props.isEditMode) {
     // 编辑模式：切换按键状态
     emit('click')
@@ -120,38 +142,46 @@ const formatDate = (dateStr?: string) => {
     minute: '2-digit'
   })
 }
+
+const getDamageLabel = (event: DamageEvent) => event.damageType === EventType.SWAP ? '调换损坏时间' : '普通损坏时间'
+const getReplacementLabel = (event: DamageEvent) => event.replacementType === EventType.SWAP ? '调换完成时间' : '普通更换时间'
+const isSwapEvent = (event: DamageEvent) => event.damageType === EventType.SWAP || event.replacementType === EventType.SWAP
+const formatKeyCode = (keyCode?: string) => {
+  if (!keyCode) return '旧数据未记录'
+  if (/^Key[A-Z]$/.test(keyCode)) return keyCode.slice(3)
+  if (/^Digit\d$/.test(keyCode)) return keyCode.slice(5)
+  if (/^Numpad\d$/.test(keyCode)) return `小键盘 ${keyCode.slice(6)}`
+  const labels: Record<string, string> = {
+    Space: '空格', Enter: 'Enter', Backspace: 'Backspace', Tab: 'Tab', Escape: 'Esc',
+    ShiftLeft: '左 Shift', ShiftRight: '右 Shift', ControlLeft: '左 Ctrl', ControlRight: '右 Ctrl',
+    AltLeft: '左 Alt', AltRight: '右 Alt', MetaLeft: '左 Win', MetaRight: '右 Win'
+  }
+  return labels[keyCode] || keyCode
+}
 </script>
 
 <template>
   <div ref="keyWrapperRef" class="key-wrapper">
-    <button
-      @click="handleClick"
-      @mouseenter="handleMouseEnter"
-      @mouseleave="handleMouseLeave"
-      :style="{ width: keyWidth, height: keyHeight }"
-      :class="[
+    <button @click="handleClick" @mouseenter="handleMouseEnter" @mouseleave="handleMouseLeave"
+      :style="{ width: keyWidth, height: keyHeight }" :data-key-code="keyDef.code" :class="[
         'key-button',
         statusClass,
         { 'key-editable': isEditMode }
-      ]"
-    >
+      ]">
       <span v-if="damageCount > 0" class="damage-count-badge">{{ damageCount }}</span>
       <span class="key-label">{{ keyDef.label }}</span>
     </button>
 
     <!-- Tooltip -->
     <Transition name="fade">
-      <div 
-        v-if="tooltipVisible"
-        class="key-tooltip"
-        :class="{ 'key-tooltip-pinned': isPinned }"
-      >
+      <div v-if="tooltipVisible" class="key-tooltip" :class="{ 'key-tooltip-pinned': isPinned }">
         <div v-if="keyHealth!.status === KeyStatus.DAMAGED" class="tooltip-content">
           <div class="tooltip-header">
             <div class="tooltip-status damaged">
               <span class="status-dot"></span>
               损坏
-              <span v-if="keyHealth!.history && keyHealth!.history.length > 1" class="tooltip-badge">第{{ keyHealth!.history.length }}次</span>
+              <span v-if="keyHealth!.history && keyHealth!.history.length > 1" class="tooltip-badge">第{{
+                keyHealth!.history.length }}次</span>
             </div>
             <span v-if="isPinned" class="pin-indicator" title="已固定，点击外部关闭">📌</span>
           </div>
@@ -159,14 +189,19 @@ const formatDate = (dateStr?: string) => {
           <div v-if="keyHealth!.history && keyHealth!.history.length > 0" ref="historyListRef" class="tooltip-history">
             <div v-for="(event, idx) in keyHealth!.history" :key="idx" class="tooltip-event">
               <div class="tooltip-info">
-                <span class="tooltip-label">
-                  <span class="event-index">#{{ idx + 1 }}</span> 损坏时间
-                </span>
+                <span class="event-index">#{{ idx + 1 }}</span>
+                <span class="tooltip-label">{{ getDamageLabel(event) }}</span>
                 <span class="tooltip-value">{{ formatDate(event.damagedAt) }}</span>
               </div>
               <div v-if="event.replacedAt" class="tooltip-info replaced-info">
-                <span class="tooltip-label">更换时间</span>
+                <span class="event-marker" aria-hidden="true">↳</span>
+                <span class="tooltip-label">{{ getReplacementLabel(event) }}</span>
                 <span class="tooltip-value">{{ formatDate(event.replacedAt) }}</span>
+              </div>
+              <div v-if="isSwapEvent(event)" class="tooltip-info swap-info">
+                <span class="event-marker" aria-hidden="true">↳</span>
+                <span class="tooltip-label">调换按键</span>
+                <span class="tooltip-value">{{ formatKeyCode(event.swapWithKeyCode) }}</span>
               </div>
             </div>
           </div>
@@ -176,7 +211,8 @@ const formatDate = (dateStr?: string) => {
             <div class="tooltip-status replaced">
               <span class="status-dot"></span>
               已更换
-              <span v-if="keyHealth!.history && keyHealth!.history.length > 1" class="tooltip-badge">第{{ keyHealth!.history.length }}次</span>
+              <span v-if="keyHealth!.history && keyHealth!.history.length > 1" class="tooltip-badge">第{{
+                keyHealth!.history.length }}次</span>
             </div>
             <span v-if="isPinned" class="pin-indicator" title="已固定，点击外部关闭">📌</span>
           </div>
@@ -184,14 +220,19 @@ const formatDate = (dateStr?: string) => {
           <div v-if="keyHealth!.history && keyHealth!.history.length > 0" ref="historyListRef" class="tooltip-history">
             <div v-for="(event, idx) in keyHealth!.history" :key="idx" class="tooltip-event">
               <div class="tooltip-info">
-                <span class="tooltip-label">
-                  <span class="event-index">#{{ idx + 1 }}</span> 损坏时间
-                </span>
+                <span class="event-index">#{{ idx + 1 }}</span>
+                <span class="tooltip-label">{{ getDamageLabel(event) }}</span>
                 <span class="tooltip-value">{{ formatDate(event.damagedAt) }}</span>
               </div>
               <div v-if="event.replacedAt" class="tooltip-info replaced-info">
-                <span class="tooltip-label">更换时间</span>
+                <span class="event-marker" aria-hidden="true">↳</span>
+                <span class="tooltip-label">{{ getReplacementLabel(event) }}</span>
                 <span class="tooltip-value">{{ formatDate(event.replacedAt) }}</span>
+              </div>
+              <div v-if="isSwapEvent(event)" class="tooltip-info swap-info">
+                <span class="event-marker" aria-hidden="true">↳</span>
+                <span class="tooltip-label">调换按键</span>
+                <span class="tooltip-value">{{ formatKeyCode(event.swapWithKeyCode) }}</span>
               </div>
             </div>
           </div>
@@ -270,7 +311,7 @@ const formatDate = (dateStr?: string) => {
 .key-damaged {
   background: linear-gradient(180deg, #dc2626 0%, #991b1b 100%);
   color: #fef2f2;
-  box-shadow: 
+  box-shadow:
     0 1px 0 0 rgba(255, 255, 255, 0.1),
     0 2px 0 0 #7f1d1d,
     0 3px 3px rgba(0, 0, 0, 0.25),
@@ -282,7 +323,7 @@ const formatDate = (dateStr?: string) => {
 .key-replaced {
   background: linear-gradient(180deg, #d97706 0%, #92400e 100%);
   color: #fefce8;
-  box-shadow: 
+  box-shadow:
     0 1px 0 0 rgba(255, 255, 255, 0.1),
     0 2px 0 0 #78350f,
     0 3px 3px rgba(0, 0, 0, 0.25),
@@ -297,7 +338,7 @@ const formatDate = (dateStr?: string) => {
 
 .key-editable.key-healthy:hover {
   transform: translateY(-2px);
-  box-shadow: 
+  box-shadow:
     var(--key-shadow),
     0 4px 8px rgba(0, 0, 0, 0.15);
 }
@@ -327,14 +368,15 @@ const formatDate = (dateStr?: string) => {
   border: 1px solid var(--color-border-light);
   border-radius: 10px;
   padding: 12px 14px;
-  min-width: 180px;
-  box-shadow: 
+  /* 时间与事件名称保持一行，避免 #序号 挤压中文标签。 */
+  min-width: 280px;
+  box-shadow:
     0 10px 25px rgba(0, 0, 0, 0.2),
     0 0 0 1px rgba(0, 0, 0, 0.05);
 }
 
 .dark .key-tooltip {
-  box-shadow: 
+  box-shadow:
     0 10px 25px rgba(0, 0, 0, 0.5),
     0 0 0 1px rgba(255, 255, 255, 0.03);
 }
@@ -342,13 +384,13 @@ const formatDate = (dateStr?: string) => {
 /* 固定状态 */
 .key-tooltip-pinned {
   border-color: var(--color-accent);
-  box-shadow: 
+  box-shadow:
     0 10px 25px rgba(0, 0, 0, 0.2),
     0 0 0 1px rgba(99, 102, 241, 0.3);
 }
 
 .dark .key-tooltip-pinned {
-  box-shadow: 
+  box-shadow:
     0 10px 25px rgba(0, 0, 0, 0.5),
     0 0 0 1px rgba(129, 140, 248, 0.4);
 }
@@ -396,21 +438,27 @@ const formatDate = (dateStr?: string) => {
 }
 
 .tooltip-info {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 28px minmax(112px, 1fr) max-content;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .tooltip-label {
+  display: inline-flex;
+  align-items: center;
   font-size: 11px;
   color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .tooltip-value {
   font-size: 11px;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .tooltip-badge {
@@ -442,15 +490,39 @@ const formatDate = (dateStr?: string) => {
 }
 
 .event-index {
+  width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
   font-size: 10px;
   font-weight: 600;
   color: var(--color-accent);
-  margin-right: 2px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .replaced-info {
-  padding-left: 12px;
-  border-left: 2px solid var(--color-replaced);
+  --event-marker-color: var(--color-replaced);
+}
+
+.swap-info {
+  --event-marker-color: var(--color-accent);
+}
+
+.event-marker {
+  width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  color: var(--event-marker-color);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
 }
 
 .tooltip-arrow {

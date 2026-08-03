@@ -1,7 +1,7 @@
 import { getUserDataPath } from "../init/path"
 import path from "path"
 import fs from "fs"
-import { isValidKeyboardHealthFile, isLegacyKeyHealth, migrateKeyHealth } from "../validator/jsonValidator"
+import { isValidKeyboardHealthFile, isLegacyKeyHealth, migrateKeyHealth, normalizeKeyHealthEventTypes } from "../validator/jsonValidator"
 import type { KeyboardHealthRecord, KeyboardHealthFile } from "../validator/jsonValidator"
 
 /**
@@ -67,11 +67,17 @@ export function getUserData(): KeyboardHealthRecord[] {
           })
           needsRewrite = true
         }
+
+        const normalizedKeyHealth = data.userData.keys[keyCode]
+        if (normalizeKeyHealthEventTypes(normalizedKeyHealth)) {
+          console.log(`[数据迁移] 按键 ${keyCode} 补齐普通/调换事件类型`)
+          needsRewrite = true
+        }
       }
 
       // 升级版本号
-      if (data._version === "1.0.0") {
-        data._version = "2.0.0"
+      if (data._version === "1.0.0" || data._version === "2.0.0" || data._version === "3.0.0") {
+        data._version = "4.0.0"
         needsRewrite = true
       }
 
@@ -100,7 +106,7 @@ export function createRecord(record: KeyboardHealthRecord) : void {
   // 1. 构造完整文件结构
   const fileData: KeyboardHealthFile = {
     _type: "keyboard-health-record",
-    _version: "2.0.0",
+    _version: "4.0.0",
     userData: record
   }
 
@@ -153,6 +159,7 @@ export function updateRecord(record: KeyboardHealthRecord): void {
 
         // 更新数据
         data.userData = record
+        data._version = "4.0.0"
 
         // 写回文件
         fs.writeFileSync(

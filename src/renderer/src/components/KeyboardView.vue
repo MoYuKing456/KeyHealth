@@ -1,20 +1,143 @@
 <script setup lang="ts">
+import { onUnmounted, ref } from 'vue'
 import { keyboardLayout } from '../data/keyboardLayout'
 import KeyButton from './KeyButton.vue'
-import type { KeyHealth } from '../types'
+import { KeyStatus, type KeyHealth } from '../types'
 
-defineProps<{
+const props = defineProps<{
   keys: Record<string, KeyHealth>
   isEditMode: boolean
 }>()
 
 const emit = defineEmits<{
   keyClick: [keyCode: string]
+  switchMove: [sourceKeyCode: string, targetKeyCode: string]
 }>()
+
+const keyboardRef = ref<HTMLElement | null>(null)
+const LONG_PRESS_MS = 450
+const DRAG_THRESHOLD_PX = 6
+
+let longPressTimer: ReturnType<typeof setTimeout> | undefined
+let pointerId: number | null = null
+let pressStart: { x: number, y: number } | null = null
+let sourceKeyCode: string | null = null
+let sourceButton: HTMLElement | null = null
+let targetButton: HTMLElement | null = null
+let isDragging = false
+
+const getButtonFromTarget = (target: EventTarget | null): HTMLElement | null => {
+  if (!(target instanceof Element)) return null
+  return target.closest<HTMLElement>('[data-key-code]')
+}
+
+const getButtonAtPoint = (x: number, y: number): HTMLElement | null => {
+  return getButtonFromTarget(document.elementFromPoint(x, y))
+}
+
+const getStatus = (keyCode: string): KeyStatus => props.keys[keyCode]?.status || KeyStatus.HEALTHY
+
+const clearDrag = () => {
+  if (longPressTimer) clearTimeout(longPressTimer)
+  longPressTimer = undefined
+  sourceButton?.classList.remove('key-drag-source')
+  targetButton?.classList.remove('key-drag-target')
+  if (pointerId !== null && keyboardRef.value?.hasPointerCapture(pointerId)) {
+    keyboardRef.value.releasePointerCapture(pointerId)
+  }
+  pointerId = null
+  pressStart = null
+  sourceKeyCode = null
+  sourceButton = null
+  targetButton = null
+  isDragging = false
+}
+
+const updateDropTarget = (x: number, y: number) => {
+  const candidate = getButtonAtPoint(x, y)
+  const candidateCode = candidate?.dataset.keyCode
+  const isValidTarget = !!candidateCode && candidateCode !== sourceKeyCode && getStatus(candidateCode) === KeyStatus.DAMAGED
+
+  if (candidate === targetButton && isValidTarget) return
+  targetButton?.classList.remove('key-drag-target')
+  targetButton = isValidTarget ? candidate : null
+  targetButton?.classList.add('key-drag-target')
+}
+
+const ignoreDraggedClick = (button: HTMLElement | null) => {
+  if (!button) return
+  button.dataset.ignoreNextClick = 'true'
+  // 若浏览器因 pointerup.preventDefault() 不派发 click，立即清理，避免影响该键位的下次正常点击。
+  setTimeout(() => {
+    delete button.dataset.ignoreNextClick
+  }, 0)
+}
+
+const handlePointerDown = (event: PointerEvent) => {
+  if (!props.isEditMode || event.button !== 0) return
+
+  const button = getButtonFromTarget(event.target)
+  const keyCode = button?.dataset.keyCode
+  if (!button || !keyCode) return
+
+  // 只有健康轴或已更换轴可以作为可拆下的来源；损坏轴只能作为放置目标。
+  const status = getStatus(keyCode)
+  if (status !== KeyStatus.HEALTHY && status !== KeyStatus.REPLACED) return
+
+  pointerId = event.pointerId
+  keyboardRef.value?.setPointerCapture(event.pointerId)
+  pressStart = { x: event.clientX, y: event.clientY }
+  sourceKeyCode = keyCode
+  sourceButton = button
+  longPressTimer = setTimeout(() => {
+    isDragging = true
+    sourceButton?.classList.add('key-drag-source')
+    updateDropTarget(event.clientX, event.clientY)
+  }, LONG_PRESS_MS)
+}
+
+const handlePointerMove = (event: PointerEvent) => {
+  if (event.pointerId !== pointerId) return
+
+  if (!isDragging) {
+    const moved = pressStart && Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y)
+    if (moved && moved > DRAG_THRESHOLD_PX) clearDrag()
+    return
+  }
+
+  event.preventDefault()
+  updateDropTarget(event.clientX, event.clientY)
+}
+
+const handlePointerUp = (event: PointerEvent) => {
+  if (event.pointerId !== pointerId) return
+
+  if (isDragging) {
+    event.preventDefault()
+    // click 若仍被浏览器派发，只忽略本次拖动涉及的按钮；绝不影响其他正常点击。
+    ignoreDraggedClick(sourceButton)
+    ignoreDraggedClick(targetButton)
+    const targetKeyCode = targetButton?.dataset.keyCode
+    if (sourceKeyCode && targetKeyCode) emit('switchMove', sourceKeyCode, targetKeyCode)
+  } else if (sourceKeyCode) {
+    // 短按 = 点击：setPointerCapture 会把 click 事件重定向到键盘容器，
+    // 导致按钮收不到点击，因此这里直接发出 keyClick。
+    // 同时给按钮打上忽略标记，防止某些浏览器仍在按钮上派发 click 造成重复触发。
+    ignoreDraggedClick(sourceButton)
+    emit('keyClick', sourceKeyCode)
+  }
+  clearDrag()
+}
+
+onUnmounted(() => {
+  clearDrag()
+})
 </script>
 
 <template>
-  <div class="keyboard-container">
+  <div ref="keyboardRef" class="keyboard-container" :class="{ 'keyboard-editing': isEditMode }"
+    @pointerdown.capture="handlePointerDown" @pointermove.capture="handlePointerMove"
+    @pointerup.capture="handlePointerUp" @pointercancel.capture="clearDrag">
     <!-- 键盘外壳 -->
     <div class="keyboard-frame">
       <div class="keyboard-inner">
@@ -209,6 +332,22 @@ const emit = defineEmits<{
   display: flex;
   justify-content: center;
   padding: 16px;
+}
+
+.keyboard-editing {
+  user-select: none;
+}
+
+:deep(.key-button.key-drag-source) {
+  opacity: 0.55;
+  transform: scale(0.96);
+  cursor: grabbing;
+}
+
+:deep(.key-button.key-drag-target) {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .keyboard-frame {
