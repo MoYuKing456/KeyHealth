@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, watch } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted, watch } from 'vue'
 import KeyboardView from './components/KeyboardView.vue'
 import CreateRecordModal from './components/CreateRecordModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
-import { EventType, KeyStatus, type KeyboardHealthRecord, type KeyHealth } from './types'
-import { keyboardLayout } from './data/keyboardLayout'
+import SelectLayoutModal from './components/SelectLayoutModal.vue'
+import DeleteRecordModal from './components/DeleteRecordModal.vue'
+import { EventType, KeyStatus, type KeyboardHealthRecord, type KeyHealth, type KeyboardLayoutType } from './types'
+import { getKeyboardLayout, getLayoutKeyCodes, buildKeyLabelMap, getDisabledLayoutReasons, layoutOptions } from './data/keyboardLayout'
 
 // 主题 — 从预加载脚本同步初始状态（已由 index.html 内联脚本提前应用到 DOM）
 const isDark = ref(window.__INITIAL_THEME__ === 'dark')
@@ -43,9 +45,31 @@ const currentRecordId = ref<string>('')
 // 编辑模式
 const isEditMode = ref(false)
 
+// 测试模式（按键可视化 + 按下次数统计；退出后清空，不做本地保存）
+const isTestMode = ref(false)
+// 测试时隐藏已记录的损坏/更换状态颜色（默认开启，保证按下反馈清晰）
+const testHideStatus = ref(true)
+// 当前按住的键（event.code -> true）
+const testPressed = reactive<Record<string, boolean>>({})
+// 本次测试各键的按下次数
+const testPressCounts = reactive<Record<string, number>>({})
+// 本次测试总按下次数
+const testTotalCount = computed(() =>
+  Object.values(testPressCounts).reduce((sum, n) => sum + n, 0)
+)
+// 当前布局的全部键位（用于过滤物理按键事件）
+const layoutKeyCodes = computed(() => {
+  if (!currentRecord.value) return new Set<string>()
+  return new Set(getLayoutKeyCodes(getKeyboardLayout(currentLayout.value)))
+})
+
 // 模态框状态
 const showCreateModal = ref(false)
 const showConfirmModal = ref(false)
+
+// 删除记录确认模态框状态
+const showDeleteModal = ref(false)
+const recordToDelete = ref<KeyboardHealthRecord | null>(null)
 
 // 下拉框展开状态
 const isDropdownOpen = ref(false)
@@ -66,36 +90,10 @@ const changeLog = ref<ChangeOp[]>([])
 // 排行视图切换
 const showRanking = ref(false)
 
-// 构建 keyCode → label 的查找表
+// 构建 keyCode → label 的查找表（按当前记录的布局）
 const keyLabelMap = computed(() => {
-  const map: Record<string, string> = {}
-
-  // 收集所有按键定义的展平列表
-  const defs = [
-    ...keyboardLayout.functionRow.escape,
-    ...keyboardLayout.functionRow.f1_f4,
-    ...keyboardLayout.functionRow.f5_f8,
-    ...keyboardLayout.functionRow.f9_f12,
-    ...keyboardLayout.mainArea.flatMap(r => r.keys),
-    ...keyboardLayout.navigationFunctionRow,
-    ...keyboardLayout.navigationArea.flatMap(r => r.keys),
-    keyboardLayout.arrowKeys.up,
-    keyboardLayout.arrowKeys.down,
-    keyboardLayout.arrowKeys.left,
-    keyboardLayout.arrowKeys.right,
-    ...keyboardLayout.numpadFunctionRow,
-    ...keyboardLayout.numpadArea.row1,
-    ...keyboardLayout.numpadArea.row2,
-    ...keyboardLayout.numpadArea.row3,
-    ...keyboardLayout.numpadArea.row4,
-    keyboardLayout.numpadArea.plus,
-    keyboardLayout.numpadArea.enter,
-  ]
-
-  for (const key of defs) {
-    map[key.code] = key.label
-  }
-  return map
+  const type = currentRecord.value?.layout || '104'
+  return buildKeyLabelMap(getKeyboardLayout(type))
 })
 
 // 排行数据：按损坏次数降序排列
@@ -153,20 +151,92 @@ const currentRecord = computed(() => {
   return records.value.find(r => r.id === currentRecordId.value)
 })
 
-// 合并当前记录和待保存的更改（编辑模式预览）
+// 当前记录的键盘布局（旧数据缺失或非法 layout 时默认 104）
+const VALID_LAYOUTS: KeyboardLayoutType[] = ['104', '98', '87']
+const isLayoutValid = (type?: KeyboardLayoutType): type is KeyboardLayoutType =>
+  !!type && (VALID_LAYOUTS as string[]).includes(type)
+
+const currentLayout = computed<KeyboardLayoutType>(() => {
+  const type = currentRecord.value?.layout
+  return isLayoutValid(type) ? type : '104'
+})
+
+// 布局选择模态框状态（旧数据适配 / 手动更换布局）
+const showSelectLayoutModal = ref(false)
+const layoutModalRecord = ref<KeyboardHealthRecord | null>(null)
+const layoutModalPreselect = ref<KeyboardLayoutType>('104')
+
+// 打开布局选择模态框
+const openSelectLayoutModal = (record: KeyboardHealthRecord) => {
+  layoutModalRecord.value = record
+  layoutModalPreselect.value = isLayoutValid(record.layout) ? record.layout : '104'
+  showSelectLayoutModal.value = true
+}
+
+// 检测旧数据：记录缺少（或非法）layout 时提示用户手动选择
+const checkLayoutForRecord = (id: string) => {
+  const record = records.value.find(r => r.id === id)
+  if (record && !isLayoutValid(record.layout)) {
+    openSelectLayoutModal(record)
+  }
+}
+
+// 选择并保存布局
+const handleSelectLayout = async (layout: KeyboardLayoutType) => {
+  const record = layoutModalRecord.value
+  if (!record) return
+  record.layout = layout
+  record.updatedAt = new Date().toISOString()
+  const payload = JSON.parse(JSON.stringify(record))
+  try {
+    await window.api.updateRecord(payload)
+    console.log('[布局已保存]', record.name, layout)
+  } catch (err) {
+    console.error('[布局保存失败]', err)
+  }
+  showSelectLayoutModal.value = false
+  layoutModalRecord.value = null
+}
+
+// 布局选择模态框的禁用原因（如旧数据有小键盘记录则 87 不可选）
+const layoutDisabledReasons = computed(() => {
+  if (!layoutModalRecord.value) return {}
+  return getDisabledLayoutReasons(layoutModalRecord.value.keys)
+})
+
+// 顶栏布局按钮文案
+const layoutButtonLabel = computed(() => {
+  const record = currentRecord.value
+  if (!record) return ''
+  if (!isLayoutValid(record.layout)) return '选择布局'
+  return layoutOptions.find(o => o.type === record.layout)?.name || `${record.layout} 键`
+})
+
+// 顶栏布局按钮：打开当前记录的布局选择
+const handleOpenLayoutModal = () => {
+  if (currentRecord.value) openSelectLayoutModal(currentRecord.value)
+}
+
+// 合并当前记录和待保存的更改（编辑模式预览），并按当前布局过滤掉布局外的键位
 const displayKeys = computed(() => {
   if (!currentRecord.value) return {}
-  if (isEditMode.value) {
-    return { ...currentRecord.value.keys, ...pendingChanges }
+  const base = isEditMode.value
+    ? { ...currentRecord.value.keys, ...pendingChanges }
+    : currentRecord.value.keys
+  const layoutCodes = new Set(getLayoutKeyCodes(getKeyboardLayout(currentLayout.value)))
+  const filtered: Record<string, KeyHealth> = {}
+  for (const [code, health] of Object.entries(base)) {
+    if (layoutCodes.has(code)) filtered[code] = health
   }
-  return currentRecord.value.keys
+  return filtered
 })
 
 // 创建新记录
-const handleCreateRecord = (name: string) => {
+const handleCreateRecord = (name: string, layout: KeyboardLayoutType) => {
   const newRecord: KeyboardHealthRecord = {
     id: Date.now().toString(),
     name,
+    layout,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     keys: {}
@@ -183,6 +253,39 @@ const selectRecord = (id: string) => {
   currentRecordId.value = id
   isDropdownOpen.value = false
   saveAppConfig()
+  // 旧数据（无布局）提示手动选择布局
+  checkLayoutForRecord(id)
+}
+
+// 打开删除确认模态框（传入要删除的记录）
+const requestDeleteRecord = (record: KeyboardHealthRecord) => {
+  recordToDelete.value = record
+  showDeleteModal.value = true
+}
+
+// 确认删除记录
+const handleDeleteRecord = async () => {
+  const record = recordToDelete.value
+  if (!record) return
+  showDeleteModal.value = false
+  recordToDelete.value = null
+
+  try {
+    await window.api.deleteRecord(record.id)
+  } catch (err) {
+    console.error('[删除失败]', err)
+    return
+  }
+
+  // 从列表中移除
+  const index = records.value.findIndex(r => r.id === record.id)
+  if (index !== -1) records.value.splice(index, 1)
+
+  // 若删除的是当前选中的记录，自动切换到剩余的第一条（无剩余则显示空状态）
+  if (currentRecordId.value === record.id) {
+    currentRecordId.value = records.value[0]?.id || ''
+    saveAppConfig()
+  }
 }
 
 // 切换编辑模式
@@ -200,6 +303,81 @@ const toggleEditMode = () => {
       hasChanges.value = false
     }
   }
+}
+
+// 测试模式：物理按键的显示与计数统一走主进程转发通道（before-input-event + PrintScreen 全局快捷键）。
+// 该通道在原生层触发、发生在渲染进程 IME 之前，code 来自硬件扫描码：
+// - 可避免中文输入法等在 DOM 层吞掉 Shift 等修饰键（右 Shift 也能被检测到）；
+// - 右 Shift / Num Enter / PrintScreen 天然准确，无需 location 归一化。
+// DOM 层只保留一个 preventDefault 监听，用于阻止空格/方向键滚动页面。
+
+const normalizeTestCode = (event: KeyboardEvent): string => {
+  let code = event.code
+  if (event.location === 2) {
+    if (code === 'ShiftLeft') code = 'ShiftRight'
+    else if (code === 'ControlLeft') code = 'ControlRight'
+    else if (code === 'AltLeft') code = 'AltRight'
+    else if (code === 'MetaLeft') code = 'MetaRight'
+  }
+  if (code === 'Enter' && event.location === 3) {
+    code = 'NumpadEnter'
+  }
+  return code
+}
+
+// 仅阻止页面默认行为（空格/方向键滚动等），避免测试时页面滚动；显示交给主进程转发通道
+const handleTestKeyPreventDefault = (event: KeyboardEvent) => {
+  const code = normalizeTestCode(event)
+  if (!layoutKeyCodes.value.has(code)) return
+  event.preventDefault()
+}
+
+// 窗口失焦时清空按住状态（防止 keyup 丢失导致高亮卡住）
+const clearTestPressed = () => {
+  Object.keys(testPressed).forEach(code => delete testPressed[code])
+}
+
+// 来自主进程转发的原始按键事件
+let unsubscribeTestKeys: (() => void) | null = null
+
+const handleRawTestKey = (data: { type: 'keydown' | 'keyup'; code: string; repeat?: boolean }) => {
+  if (!isTestMode.value) return
+  const code = data.code
+  if (!layoutKeyCodes.value.has(code)) return
+  if (data.type === 'keydown') {
+    // 忽略长按自动重复，只计有效按压
+    if (!data.repeat) testPressCounts[code] = (testPressCounts[code] || 0) + 1
+    testPressed[code] = true
+  } else {
+    delete testPressed[code]
+  }
+}
+
+// 切换测试模式：开启时通知主进程转发按键，退出时卸载并清空本次测试数据
+const toggleTestMode = () => {
+  isTestMode.value = !isTestMode.value
+  if (isTestMode.value) {
+    showRanking.value = false  // 测试模式自动关闭排行
+    window.api.setTestMode?.(true)
+    unsubscribeTestKeys = window.api.onTestKeyEvent?.(handleRawTestKey) ?? null
+    window.addEventListener('keydown', handleTestKeyPreventDefault)
+    window.addEventListener('blur', clearTestPressed)
+  } else {
+    window.api.setTestMode?.(false)
+    unsubscribeTestKeys?.()
+    unsubscribeTestKeys = null
+    window.removeEventListener('keydown', handleTestKeyPreventDefault)
+    window.removeEventListener('blur', clearTestPressed)
+    // 退出后清空本次测试的按下次数与按住状态（不做本地保存）
+    Object.keys(testPressCounts).forEach(code => delete testPressCounts[code])
+    Object.keys(testPressed).forEach(code => delete testPressed[code])
+  }
+}
+
+// 清空测试计数（不退出测试模式）
+const resetTestCounts = () => {
+  Object.keys(testPressCounts).forEach(code => delete testPressCounts[code])
+  Object.keys(testPressed).forEach(code => delete testPressed[code])
 }
 
 // 处理按键点击（编辑模式）
@@ -387,7 +565,8 @@ const stats = computed(() => {
     if (k.status === KeyStatus.DAMAGED) damaged++
     if (k.status === KeyStatus.REPLACED) replaced++
   })
-  return { damaged, replaced, total: 104 }
+  const total = getLayoutKeyCodes(getKeyboardLayout(currentLayout.value)).length
+  return { damaged, replaced, total }
 })
 
 // 点击外部关闭下拉框
@@ -419,8 +598,21 @@ const initUserData = async () => {
       ? lastRecordId
       : records.value[0].id
     currentRecordId.value = target
+    // 旧数据（无布局）提示手动选择布局
+    checkLayoutForRecord(target)
   }
 }
+
+// 组件卸载时兜底清理测试模式监听
+onUnmounted(() => {
+  window.api.setTestMode?.(false)
+  if (isTestMode.value) {
+    window.removeEventListener('keydown', handleTestKeyPreventDefault)
+    window.removeEventListener('blur', clearTestPressed)
+  }
+  unsubscribeTestKeys?.()
+  unsubscribeTestKeys = null
+})
 </script>
 
 <template>
@@ -448,8 +640,8 @@ const initUserData = async () => {
           <div class="dropdown-wrapper">
             <label class="dropdown-label">当前键盘</label>
             <div class="dropdown-container">
-              <button class="dropdown-trigger" :class="{ 'dropdown-open': isDropdownOpen }" :disabled="isEditMode"
-                @click.stop="isDropdownOpen = !isDropdownOpen">
+              <button class="dropdown-trigger" :class="{ 'dropdown-open': isDropdownOpen }"
+                :disabled="isEditMode || isTestMode" @click.stop="isDropdownOpen = !isDropdownOpen">
                 <span class="dropdown-value">{{ currentRecord?.name || '选择键盘' }}</span>
                 <svg class="dropdown-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="6 9 12 15 18 9"></polyline>
@@ -458,25 +650,51 @@ const initUserData = async () => {
 
               <Transition name="dropdown">
                 <div v-if="isDropdownOpen && !isEditMode" class="dropdown-menu">
-                  <button v-for="record in records" :key="record.id" class="dropdown-item"
-                    :class="{ 'dropdown-item-active': record.id === currentRecordId }" @click="selectRecord(record.id)">
-                    <span class="dropdown-item-name">{{ record.name }}</span>
-                    <svg v-if="record.id === currentRecordId" class="dropdown-item-check" viewBox="0 0 24 24"
-                      fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </button>
+                  <div v-for="record in records" :key="record.id" class="dropdown-item"
+                    :class="{ 'dropdown-item-active': record.id === currentRecordId }">
+                    <button class="dropdown-item-select" @click="selectRecord(record.id)">
+                      <span class="dropdown-item-name">{{ record.name }}</span>
+                      <svg v-if="record.id === currentRecordId" class="dropdown-item-check" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                    </button>
+                    <button class="dropdown-item-delete" title="删除记录" @click.stop="requestDeleteRecord(record)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </Transition>
             </div>
           </div>
+
+          <!-- 键盘布局 -->
+          <button v-if="currentRecord" class="layout-tag"
+            :class="{ 'layout-tag-pending': !isLayoutValid(currentRecord.layout) }"
+            :disabled="isEditMode || isTestMode"
+            :title="isLayoutValid(currentRecord.layout) ? '更换键盘布局' : '请为此键盘选择布局'" @click="handleOpenLayoutModal">
+            <svg class="layout-tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="6" width="20" height="12" rx="2" />
+              <line x1="6" y1="10" x2="6" y2="10.01" stroke-width="2" stroke-linecap="round" />
+              <line x1="10" y1="10" x2="10" y2="10.01" stroke-width="2" stroke-linecap="round" />
+              <line x1="14" y1="10" x2="14" y2="10.01" stroke-width="2" stroke-linecap="round" />
+              <line x1="18" y1="10" x2="18" y2="10.01" stroke-width="2" stroke-linecap="round" />
+              <line x1="6" y1="14" x2="18" y2="14" stroke-linecap="round" />
+            </svg>
+            <span>{{ layoutButtonLabel }}</span>
+          </button>
         </div>
 
         <!-- 右侧：主题切换 + 操作按钮 -->
         <div class="header-right">
           <!-- 排行切换 -->
           <button class="theme-toggle" :class="{ 'toggle-active': showRanking }"
-            :title="showRanking ? '返回键盘视图' : '查看损坏排行'" :disabled="isEditMode" @click="showRanking = !showRanking">
+            :title="showRanking ? '返回键盘视图' : '查看损坏排行'" :disabled="isEditMode || isTestMode"
+            @click="showRanking = !showRanking">
             <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="20" x2="18" y2="10" />
               <line x1="12" y1="20" x2="12" y2="4" />
@@ -505,8 +723,18 @@ const initUserData = async () => {
 
           <div class="divider"></div>
 
+          <!-- 测试按钮 -->
+          <button @click="toggleTestMode" :disabled="!currentRecord || isEditMode"
+            :class="['btn', isTestMode ? 'btn-test-active' : 'btn-secondary']">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+            </svg>
+            {{ isTestMode ? '退出测试' : '测试模式' }}
+          </button>
+
           <!-- 编辑按钮 -->
-          <button @click="toggleEditMode" :class="['btn', isEditMode ? 'btn-active' : 'btn-secondary']">
+          <button @click="toggleEditMode" :disabled="isTestMode"
+            :class="['btn', isEditMode ? 'btn-active' : 'btn-secondary']">
             <svg v-if="!isEditMode" class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -520,7 +748,7 @@ const initUserData = async () => {
           </button>
 
           <!-- 创建按钮 -->
-          <button @click="showCreateModal = true" :disabled="isEditMode" class="btn btn-primary">
+          <button @click="showCreateModal = true" :disabled="isEditMode || isTestMode" class="btn btn-primary">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
@@ -547,6 +775,56 @@ const initUserData = async () => {
             <div class="edit-banner-text">
               <span class="edit-banner-title">编辑模式已开启</span>
               <span class="edit-banner-desc">点击按键循环切换状态；长按健康或已更换轴拖到损坏轴，会记录目标更换与来源损坏</span>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 测试模式提示 -->
+      <Transition name="slide">
+        <div v-if="isTestMode" class="test-banner">
+          <div class="test-banner-content">
+            <div class="test-banner-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+              </svg>
+            </div>
+            <div class="test-banner-text">
+              <span class="test-banner-title">测试模式已开启</span>
+              <span class="test-banner-desc">按下实体键盘按键即可在面板上高亮显示并记录次数；退出后自动清空，不会保存</span>
+              <span class="test-hint-trigger" tabindex="0">
+                <svg class="test-hint-trigger-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                <span>按键无反应？</span>
+                <div class="test-hint-tooltip" role="tooltip">
+                  若个别按键（如右侧 Shift）按下无反应，多为中文输入法拦截了该键（中/英切换），
+                  请切换英文输入法或在输入法设置中取消绑定 Shift。
+                </div>
+              </span>
+            </div>
+            <div class="test-banner-controls">
+              <div class="test-total">
+                <span class="test-total-value">{{ testTotalCount }}</span>
+                <span class="test-total-label">总按下次数</span>
+              </div>
+              <label class="test-switch" title="隐藏已记录的损坏/更换状态颜色，让按下反馈更清晰">
+                <input v-model="testHideStatus" type="checkbox" />
+                <span class="test-switch-track">
+                  <span class="test-switch-thumb"></span>
+                </span>
+                <span class="test-switch-label">隐藏状态颜色</span>
+              </label>
+              <button class="test-reset-btn" title="清空本次测试的按下次数" @click="resetTestCounts">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 4v6h6M23 20v-6h-6" />
+                  <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15" />
+                </svg>
+                清空计数
+              </button>
             </div>
           </div>
         </div>
@@ -579,8 +857,8 @@ const initUserData = async () => {
 
       <!-- 有键盘时的内容 -->
       <template v-else>
-        <!-- 状态统计和图例 -->
-        <div v-if="!showRanking" class="info-bar">
+        <!-- 状态统计和图例（测试模式下隐藏，改用测试横幅） -->
+        <div v-if="!showRanking && !isTestMode" class="info-bar">
           <div class="legend">
             <div class="legend-item">
               <div class="legend-dot healthy"></div>
@@ -615,7 +893,9 @@ const initUserData = async () => {
         </div>
 
         <!-- 键盘视图 / 排行视图 -->
-        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode" @key-click="handleKeyClick"
+        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode"
+          :layout="getKeyboardLayout(currentLayout)" :test-mode="isTestMode" :test-pressed="testPressed"
+          :test-press-counts="testPressCounts" :test-hide-status="testHideStatus" @key-click="handleKeyClick"
           @switch-move="handleSwitchMove" />
 
         <!-- 损坏排行柱状图 -->
@@ -663,9 +943,18 @@ const initUserData = async () => {
     <!-- 创建记录模态框 -->
     <CreateRecordModal v-if="showCreateModal" @close="showCreateModal = false" @create="handleCreateRecord" />
 
+    <!-- 选择布局模态框（旧数据适配 / 更换布局） -->
+    <SelectLayoutModal v-if="showSelectLayoutModal" :record-name="layoutModalRecord?.name || ''"
+      :current-layout="layoutModalPreselect" :disabled-reasons="layoutDisabledReasons" @select="handleSelectLayout"
+      @cancel="showSelectLayoutModal = false" />
+
     <!-- 确认保存模态框 -->
     <ConfirmModal v-if="showConfirmModal" title="保存更改" :changes="changesSummary" @save="saveChanges"
       @discard="discardChanges" @cancel="showConfirmModal = false" />
+
+    <!-- 删除记录确认模态框 -->
+    <DeleteRecordModal v-if="showDeleteModal && recordToDelete" :record-name="recordToDelete.name"
+      @confirm="handleDeleteRecord" @cancel="showDeleteModal = false" />
   </div>
 </template>
 
@@ -816,15 +1105,7 @@ const initUserData = async () => {
 .dropdown-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 10px 12px;
-  border: none;
-  background: transparent;
   border-radius: 6px;
-  font-size: 13px;
-  color: var(--color-text-primary);
-  cursor: pointer;
   transition: all 0.1s ease;
 }
 
@@ -834,20 +1115,122 @@ const initUserData = async () => {
 
 .dropdown-item-active {
   background: var(--color-accent-light);
-  color: var(--color-accent);
 }
 
 .dropdown-item-active:hover {
   background: var(--color-accent-light);
 }
 
+/* 记录选中部分（点击切换记录） */
+.dropdown-item-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 1;
+  gap: 8px;
+  padding: 10px 0 10px 12px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+
 .dropdown-item-name {
   font-weight: 500;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-item-active .dropdown-item-name {
+  color: var(--color-accent);
 }
 
 .dropdown-item-check {
   width: 16px;
   height: 16px;
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+/* 记录删除按钮（悬停时显示） */
+.dropdown-item-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: 4px 6px 4px 4px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.dropdown-item:hover .dropdown-item-delete,
+.dropdown-item-delete:focus-visible {
+  opacity: 1;
+}
+
+.dropdown-item-delete:hover {
+  background: var(--color-damaged-light);
+  color: var(--color-damaged);
+}
+
+.dropdown-item-delete svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 键盘布局标签按钮 */
+.layout-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.layout-tag:hover:not(:disabled) {
+  border-color: var(--color-border-light);
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.layout-tag:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.layout-tag-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 旧数据未选布局时的强调态 */
+.layout-tag-pending {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.layout-tag-pending:hover:not(:disabled) {
+  border-color: var(--color-accent);
   color: var(--color-accent);
 }
 
@@ -947,6 +1330,15 @@ const initUserData = async () => {
   background: var(--color-accent-hover);
 }
 
+.btn-test-active {
+  background: var(--color-test);
+  color: #fff;
+}
+
+.btn-test-active:hover {
+  background: var(--color-test-hover);
+}
+
 /* Main */
 .app-main {
   flex: 1;
@@ -1005,6 +1397,230 @@ const initUserData = async () => {
 .edit-banner-desc {
   font-size: 13px;
   color: var(--color-text-secondary);
+}
+
+/* Test Banner（测试模式） */
+.test-banner {
+  width: 100%;
+  max-width: 960px;
+  background: var(--color-test-light);
+  border: 1px solid var(--color-test-border);
+  border-radius: 12px;
+  padding: 12px 18px;
+}
+
+.test-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.test-banner-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--color-test);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.test-banner-icon svg {
+  width: 20px;
+  height: 20px;
+  color: #fff;
+}
+
+.test-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.test-banner-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.test-banner-desc {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* 中文输入法拦截按键：悬停说明按钮 + 工具提示 */
+.test-hint-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  cursor: help;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.test-hint-trigger:hover {
+  color: var(--color-accent-hover);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+
+/* 悬停桥：连接触发区与工具提示，避免鼠标移到提示时误触发隐藏 */
+.test-hint-trigger::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
+}
+
+.test-hint-trigger-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.test-hint-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 120;
+  width: 340px;
+  max-width: 70vw;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-light);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.18);
+}
+
+.dark .test-hint-tooltip {
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+}
+
+.test-hint-trigger:hover .test-hint-tooltip,
+.test-hint-trigger:focus .test-hint-tooltip,
+.test-hint-trigger:focus-within .test-hint-tooltip {
+  display: block;
+}
+
+.test-banner-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+/* 总按下次数 */
+.test-total {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+}
+
+.test-total-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-test);
+  font-variant-numeric: tabular-nums;
+}
+
+.test-total-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* 隐藏状态颜色开关 */
+.test-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.test-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.test-switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--color-border-light);
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+
+.test-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.test-switch input:checked + .test-switch-track {
+  background: var(--color-test);
+}
+
+.test-switch input:checked + .test-switch-track .test-switch-thumb {
+  transform: translateX(16px);
+}
+
+.test-switch-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* 清空计数按钮 */
+.test-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.test-reset-btn:hover {
+  border-color: var(--color-border-light);
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.test-reset-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* Info Bar */

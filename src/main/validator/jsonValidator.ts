@@ -10,6 +10,7 @@ export interface DamageEvent {
 export interface KeyboardHealthRecord {
   id: string
   name: string
+  layout?: string
   createdAt: string
   updatedAt: string
   keys: Record<string, any>

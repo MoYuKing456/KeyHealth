@@ -180,3 +180,49 @@ export function updateRecord(record: KeyboardHealthRecord): void {
     console.warn(`[未找到记录] id=${record.id}`)
   }
 }
+
+/**
+ * 按记录 id 删除对应的数据文件。
+ * 返回是否成功删除（未找到或失败返回 false）。
+ */
+export function deleteRecord(id: string): boolean {
+  const userDataPath = getUserDataPath()
+
+  if (!fs.existsSync(userDataPath)) {
+    console.warn(`[删除失败] 数据目录不存在: ${userDataPath}`)
+    return false
+  }
+
+  let files: string[] = []
+  try {
+    files = fs.readdirSync(userDataPath)
+  } catch (err) {
+    console.warn(`[删除失败] 读取目录失败: ${userDataPath}`, err)
+    return false
+  }
+
+  const jsonFiles = files
+    .filter(file => file.endsWith(".json"))
+    .map(file => path.join(userDataPath, file))
+
+  for (const filePath of jsonFiles) {
+    try {
+      const content = fs.readFileSync(filePath, "utf-8")
+      const data: KeyboardHealthFile = JSON.parse(content)
+
+      if (!isValidKeyboardHealthFile(data)) continue
+
+      // 用 id 匹配（与 updateRecord 一致）
+      if (data.userData.id === id) {
+        fs.unlinkSync(filePath)
+        console.log(`[删除成功] ${filePath}`)
+        return true
+      }
+    } catch (err) {
+      console.warn(`[删除失败] ${filePath}`, err)
+    }
+  }
+
+  console.warn(`[未找到记录] id=${id}`)
+  return false
+}

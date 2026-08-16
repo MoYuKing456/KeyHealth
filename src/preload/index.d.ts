@@ -15,6 +15,9 @@ declare global {
       getUserData(): Promise<any[]>
       createRecord(data: any): Promise<void>
       updateRecord(data: any): Promise<void>
+      deleteRecord(id: string): Promise<boolean>
+      onTestKeyEvent(callback: (data: { type: 'keydown' | 'keyup'; code: string; repeat?: boolean }) => void): () => void
+      setTestMode(active: boolean): void
       getConfig(): Promise<AppConfig>
       saveConfig(config: AppConfig): Promise<void>
     }

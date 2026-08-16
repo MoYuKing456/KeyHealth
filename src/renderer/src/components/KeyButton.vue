@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { computed, ref, nextTick, onMounted, onUnmounted, watch, inject } from 'vue'
+import type { ComputedRef } from 'vue'
 import { EventType, KeyStatus, type DamageEvent, type KeyDefinition, type KeyHealth } from '../types'
 
 const props = defineProps<{
@@ -13,10 +14,29 @@ const emit = defineEmits<{
   click: []
 }>()
 
+// 测试模式状态（由 KeyboardView provide 注入）
+interface TestState {
+  testMode: boolean
+  pressedKeys: Record<string, boolean>
+  pressCounts: Record<string, number>
+  hideStatus: boolean
+}
+const testState = inject<ComputedRef<TestState> | null>('testState', null)
+const isTestMode = computed(() => testState?.value.testMode || false)
+// 当前键是否被物理按下（测试模式高亮）
+const isPressed = computed(() => isTestMode.value && !!testState?.value.pressedKeys[props.keyDef.code])
+// 本次测试中该键的按下次数
+const pressCount = computed(() => (isTestMode.value ? testState?.value.pressCounts[props.keyDef.code] || 0 : 0))
+
 const showTooltip = ref(false)
 const isPinned = ref(false)
 const historyListRef = ref<HTMLElement | null>(null)
 const keyWrapperRef = ref<HTMLElement | null>(null)
+const tooltipRef = ref<HTMLElement | null>(null)
+const arrowRef = ref<HTMLElement | null>(null)
+
+// 工具提示距视口边缘的最小间距
+const TOOLTIP_MARGIN = 8
 
 const keyWidth = computed(() => {
   const baseWidth = 44
@@ -49,9 +69,10 @@ const statusClass = computed(() => {
   }
 })
 
-// 工具提示是否可见
+// 工具提示是否可见（测试模式下不显示，避免干扰按键反馈）
 const tooltipVisible = computed(() => {
   if (!props.keyHealth || props.keyHealth.status === KeyStatus.HEALTHY) return false
+  if (isTestMode.value) return false
   return showTooltip.value || isPinned.value
 })
 
@@ -61,6 +82,53 @@ const scrollHistoryToBottom = async () => {
   if (historyListRef.value) {
     historyListRef.value.scrollTop = historyListRef.value.scrollHeight
   }
+}
+
+// 工具提示定位：默认显示在键上方并水平居中；靠近视口左右边缘时水平夹紧，
+// 上方空间不足时翻转到键下方，保证信息框始终完整可见，箭头仍指向该键。
+const positionTooltip = async () => {
+  await nextTick()
+  const wrapper = keyWrapperRef.value
+  const tooltip = tooltipRef.value
+  if (!wrapper || !tooltip) return
+
+  const wrapRect = wrapper.getBoundingClientRect()
+  const tipRect = tooltip.getBoundingClientRect()
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const margin = TOOLTIP_MARGIN
+  const gap = 10
+  const keyCenter = wrapRect.left + wrapRect.width / 2
+
+  // 垂直：上方空间不足且下方足够时翻转到键下方
+  const spaceAbove = wrapRect.top - margin
+  const spaceBelow = vh - wrapRect.bottom - margin
+  const showBelow = tipRect.height + gap > spaceAbove && tipRect.height + gap <= spaceBelow
+  tooltip.classList.toggle('key-tooltip-below', showBelow)
+
+  // 水平：以键中心为锚点，把工具提示夹紧在视口内
+  const desiredLeft = keyCenter - tipRect.width / 2
+  const clampedLeft = Math.min(
+    Math.max(desiredLeft, margin),
+    Math.max(margin, vw - tipRect.width - margin)
+  )
+  const shift = clampedLeft - keyCenter
+  tooltip.style.setProperty('--tip-x', `${shift}px`)
+
+  // 箭头保持指向键中心（相对工具提示左边缘）
+  if (arrowRef.value) {
+    arrowRef.value.style.left = `${keyCenter - clampedLeft}px`
+  }
+}
+
+// 工具提示可见时重新定位；隐藏时无需处理（v-if 会销毁元素）
+watch(tooltipVisible, (visible) => {
+  if (visible) positionTooltip()
+})
+
+// 窗口尺寸变化时重新定位可见的工具提示
+const handleWindowResize = () => {
+  if (tooltipVisible.value) positionTooltip()
 }
 
 // 编辑模式下状态切换会让 v-if/v-else-if 重建历史列表 DOM、滚动位置重置到顶部。
@@ -77,6 +145,9 @@ watch(
 
 // 按键点击处理
 const handleClick = (event: MouseEvent) => {
+  // 测试模式下屏蔽点击行为（固定/切换记录窗口等），只响应物理键盘
+  if (isTestMode.value) return
+
   const button = event.currentTarget as HTMLButtonElement
   // 仅忽略本次长按拖动所产生的 click；标记挂在具体按钮上，不会影响下一次普通点击。
   if (button.dataset.ignoreNextClick === 'true') {
@@ -126,10 +197,12 @@ const handleOutsideClick = (e: MouseEvent) => {
 
 onMounted(() => {
   document.addEventListener('mousedown', handleOutsideClick, true)
+  window.addEventListener('resize', handleWindowResize)
 })
 
 onUnmounted(() => {
   document.removeEventListener('mousedown', handleOutsideClick, true)
+  window.removeEventListener('resize', handleWindowResize)
 })
 
 const formatDate = (dateStr?: string) => {
@@ -166,15 +239,16 @@ const formatKeyCode = (keyCode?: string) => {
       :style="{ width: keyWidth, height: keyHeight }" :data-key-code="keyDef.code" :class="[
         'key-button',
         statusClass,
-        { 'key-editable': isEditMode }
+        { 'key-editable': isEditMode, 'key-test-pressed': isPressed }
       ]">
       <span v-if="damageCount > 0" class="damage-count-badge">{{ damageCount }}</span>
+      <span v-if="isTestMode && pressCount > 0" class="test-count-badge">{{ pressCount }}</span>
       <span class="key-label">{{ keyDef.label }}</span>
     </button>
 
     <!-- Tooltip -->
     <Transition name="fade">
-      <div v-if="tooltipVisible" class="key-tooltip" :class="{ 'key-tooltip-pinned': isPinned }">
+      <div v-if="tooltipVisible" ref="tooltipRef" class="key-tooltip" :class="{ 'key-tooltip-pinned': isPinned }">
         <div v-if="keyHealth!.status === KeyStatus.DAMAGED" class="tooltip-content">
           <div class="tooltip-header">
             <div class="tooltip-status damaged">
@@ -237,7 +311,7 @@ const formatKeyCode = (keyCode?: string) => {
             </div>
           </div>
         </div>
-        <div class="tooltip-arrow"></div>
+        <div ref="arrowRef" class="tooltip-arrow"></div>
       </div>
     </Transition>
   </div>
@@ -331,6 +405,38 @@ const formatKeyCode = (keyCode?: string) => {
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
+/* 测试模式：物理按键按下高亮（覆盖健康/损坏/更换底色，保证反馈清晰）
+   使用固定的深靛蓝（与程序主色一致），避免暗色主题下 --color-accent 过亮导致白字看不清 */
+.key-button.key-test-pressed {
+  background: linear-gradient(180deg, #6366f1 0%, #4f46e5 100%);
+  color: #fff;
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.2),
+    0 2px 0 0 #4338ca,
+    inset 0 2px 8px rgba(0, 0, 0, 0.3);
+  transform: translateY(2px);
+}
+
+/* 测试模式：按下次数徽标（右下角） */
+.test-count-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 2;
+  background: #4f46e5;
+  color: #fff;
+  letter-spacing: 0;
+}
+
 /* 编辑模式 */
 .key-editable {
   cursor: pointer;
@@ -357,22 +463,37 @@ const formatKeyCode = (keyCode?: string) => {
   transform: translateY(1px);
 }
 
-/* Tooltip */
+/* Tooltip：水平位置用 --tip-x 控制（默认 -50% 居中；靠近视口边缘时由脚本夹紧为像素值） */
 .key-tooltip {
+  --tip-x: -50%;
   position: absolute;
   z-index: 100;
   bottom: calc(100% + 10px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(var(--tip-x));
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border-light);
   border-radius: 10px;
   padding: 12px 14px;
   /* 时间与事件名称保持一行，避免 #序号 挤压中文标签。 */
   min-width: 280px;
+  max-width: calc(100vw - 16px);
   box-shadow:
     0 10px 25px rgba(0, 0, 0, 0.2),
     0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+
+/* 顶部空间不足时翻转到键下方 */
+.key-tooltip.key-tooltip-below {
+  bottom: auto;
+  top: calc(100% + 10px);
+}
+
+.key-tooltip.key-tooltip-below .tooltip-arrow {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: var(--color-surface-elevated);
 }
 
 .dark .key-tooltip {
@@ -534,15 +655,15 @@ const formatKeyCode = (keyCode?: string) => {
   border-top-color: var(--color-surface-elevated);
 }
 
-/* Transition */
+/* Transition：仅淡入淡出，位置由 --tip-x 决定，避免夹紧时动画跳动 */
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
-  transform: translateX(-50%) translateY(4px);
+  transform: translateX(var(--tip-x)) translateY(4px);
 }
 </style>

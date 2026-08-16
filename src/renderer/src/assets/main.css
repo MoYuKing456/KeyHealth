@@ -19,7 +19,13 @@
   --color-damaged-light: rgba(239, 68, 68, 0.1);
   --color-replaced: #f59e0b;
   --color-replaced-light: rgba(245, 158, 11, 0.1);
-  
+
+  /* 测试模式配色 - 亮色 */
+  --color-test: #16a34a;
+  --color-test-hover: #15803d;
+  --color-test-light: rgba(22, 163, 74, 0.12);
+  --color-test-border: rgba(22, 163, 74, 0.35);
+
   /* 键盘颜色 - 亮色 */
   --keyboard-frame-bg: linear-gradient(145deg, #e8e8ec 0%, #d8d8dc 100%);
   --keyboard-inner-bg: linear-gradient(180deg, #f0f0f2 0%, #e5e5e8 100%);
@@ -29,7 +35,7 @@
   --key-shadow-bottom: #c8c8cc;
   --key-text: #3a3a3c;
   --key-text-hover: #1d1d1f;
-  
+
   /* 键盘尺寸 */
   --key-size: 44px;
   --key-gap: 4px;
@@ -54,7 +60,13 @@
   --color-damaged-light: rgba(239, 68, 68, 0.15);
   --color-replaced: #f59e0b;
   --color-replaced-light: rgba(245, 158, 11, 0.15);
-  
+
+  /* 测试模式配色 - 暗色（更亮的绿以便在暗底上可读） */
+  --color-test: #22c55e;
+  --color-test-hover: #4ade80;
+  --color-test-light: rgba(34, 197, 94, 0.14);
+  --color-test-border: rgba(34, 197, 94, 0.4);
+
   /* 键盘颜色 - 暗色优化：更浅的按键颜色，提高对比度 */
   --keyboard-frame-bg: linear-gradient(145deg, #1c1c20 0%, #101012 100%);
   --keyboard-inner-bg: linear-gradient(180deg, #1a1a1d 0%, #121214 100%);

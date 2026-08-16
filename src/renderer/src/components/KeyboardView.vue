@@ -1,18 +1,31 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
-import { keyboardLayout } from '../data/keyboardLayout'
+import { onUnmounted, ref, computed, provide } from 'vue'
 import KeyButton from './KeyButton.vue'
-import { KeyStatus, type KeyHealth } from '../types'
+import { KeyStatus, type KeyHealth, type KeyboardLayout } from '../types'
 
 const props = defineProps<{
   keys: Record<string, KeyHealth>
   isEditMode: boolean
+  layout: KeyboardLayout
+  // 测试模式（键盘按压可视化）
+  testMode?: boolean
+  testPressed?: Record<string, boolean>
+  testPressCounts?: Record<string, number>
+  testHideStatus?: boolean
 }>()
 
 const emit = defineEmits<{
   keyClick: [keyCode: string]
   switchMove: [sourceKeyCode: string, targetKeyCode: string]
 }>()
+
+// 测试模式状态：通过 provide 提供给所有 KeyButton（避免在每个调用处重复传 props）
+provide('testState', computed(() => ({
+  testMode: props.testMode || false,
+  pressedKeys: props.testPressed || {},
+  pressCounts: props.testPressCounts || {},
+  hideStatus: props.testHideStatus || false
+})))
 
 const keyboardRef = ref<HTMLElement | null>(null)
 const LONG_PRESS_MS = 450
@@ -135,8 +148,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="keyboardRef" class="keyboard-container" :class="{ 'keyboard-editing': isEditMode }"
-    @pointerdown.capture="handlePointerDown" @pointermove.capture="handlePointerMove"
+  <div ref="keyboardRef" class="keyboard-container" :class="[
+    { 'keyboard-editing': isEditMode, 'keyboard-testing': testMode },
+    { 'keyboard-test-hide-status': testHideStatus },
+    `layout-${layout.id}`
+  ]" @pointerdown.capture="handlePointerDown" @pointermove.capture="handlePointerMove"
     @pointerup.capture="handlePointerUp" @pointercancel.capture="clearDrag">
     <!-- 键盘外壳 -->
     <div class="keyboard-frame">
@@ -149,96 +165,97 @@ onUnmounted(() => {
             <div class="function-row">
               <!-- Esc 单独 -->
               <div class="key-group">
-                <KeyButton v-for="key in keyboardLayout.functionRow.escape" :key="key.code" :key-def="key"
+                <KeyButton v-for="key in layout.functionRow.escape" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
               <!-- ESC 后的大间隔 -->
               <div class="function-spacer-large"></div>
               <!-- F1-F4 -->
               <div class="key-group">
-                <KeyButton v-for="key in keyboardLayout.functionRow.f1_f4" :key="key.code" :key-def="key"
+                <KeyButton v-for="key in layout.functionRow.f1_f4" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
               <!-- F 键组之间的小间隔 -->
               <div class="function-spacer-small"></div>
               <!-- F5-F8 -->
               <div class="key-group">
-                <KeyButton v-for="key in keyboardLayout.functionRow.f5_f8" :key="key.code" :key-def="key"
+                <KeyButton v-for="key in layout.functionRow.f5_f8" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
               <!-- F 键组之间的小间隔 -->
               <div class="function-spacer-small"></div>
               <!-- F9-F12 -->
               <div class="key-group">
-                <KeyButton v-for="key in keyboardLayout.functionRow.f9_f12" :key="key.code" :key-def="key"
+                <KeyButton v-for="key in layout.functionRow.f9_f12" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
             </div>
 
             <!-- 主键盘区域（数字行到空格行） -->
             <div class="main-keys">
-              <div v-for="(row, rowIndex) in keyboardLayout.mainArea" :key="`main-${rowIndex}`" class="key-row">
+              <div v-for="(row, rowIndex) in layout.mainArea" :key="`main-${rowIndex}`" class="key-row">
                 <KeyButton v-for="key in row.keys" :key="key.code" :key-def="key" :key-health="keys[key.code]"
                   :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
             </div>
           </div>
 
-          <!-- 中间：导航区域 -->
-          <div class="nav-section">
-            <!-- 导航功能键行 (PrtSc, ScrLk, Pause) - 与主键盘功能键行对齐 -->
+          <!-- 中间：导航区域（104/87 渲染；98 布局当前不渲染，数字区直接与主键盘区贴合） -->
+          <div v-if="layout.showNavSection" class="nav-section">
+            <!-- 导航顶部行：PrtSc/ScrLk/Pause -->
             <div class="function-row">
-              <div class="key-group">
-                <KeyButton v-for="key in keyboardLayout.navigationFunctionRow" :key="key.code" :key-def="key"
+              <div v-if="layout.navigationFunctionRow.length > 0" class="key-group">
+                <KeyButton v-for="key in layout.navigationFunctionRow" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
             </div>
 
-            <!-- 导航主体区域 -->
+            <!-- 导航主体区域（编辑键 + 空白行 + 方向键） -->
             <div class="nav-keys">
-              <div v-for="(row, rowIndex) in keyboardLayout.navigationArea" :key="`nav-${rowIndex}`" class="key-row">
+              <!-- 编辑键：3 列横排 -->
+              <div v-for="(row, rowIndex) in layout.navigationArea" :key="`nav-${rowIndex}`" class="key-row">
                 <KeyButton v-for="key in row.keys" :key="key.code" :key-def="key" :key-health="keys[key.code]"
                   :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
 
-              <!-- 空白行（用于对齐方向键） -->
-              <div class="spacer-row"></div>
+              <!-- 空白行补齐：使方向键与主键盘区 Shift / Ctrl 行对齐 -->
+              <div v-for="n in (3 - layout.navigationArea.length)" :key="`nav-spacer-${n}`" class="spacer-row"></div>
 
               <!-- 方向键区域 -->
               <div class="arrow-keys">
                 <!-- 上方向键 -->
                 <div class="arrow-row-up">
-                  <KeyButton :key-def="keyboardLayout.arrowKeys.up" :key-health="keys[keyboardLayout.arrowKeys.up.code]"
-                    :is-edit-mode="isEditMode" @click="emit('keyClick', keyboardLayout.arrowKeys.up.code)" />
+                  <KeyButton :key-def="layout.arrowKeys.up" :key-health="keys[layout.arrowKeys.up.code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.up.code)" />
                 </div>
                 <!-- 左、下、右方向键 -->
                 <div class="arrow-row-bottom">
-                  <KeyButton :key-def="keyboardLayout.arrowKeys.left"
-                    :key-health="keys[keyboardLayout.arrowKeys.left.code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.arrowKeys.left.code)" />
-                  <KeyButton :key-def="keyboardLayout.arrowKeys.down"
-                    :key-health="keys[keyboardLayout.arrowKeys.down.code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.arrowKeys.down.code)" />
-                  <KeyButton :key-def="keyboardLayout.arrowKeys.right"
-                    :key-health="keys[keyboardLayout.arrowKeys.right.code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.arrowKeys.right.code)" />
+                  <KeyButton :key-def="layout.arrowKeys.left" :key-health="keys[layout.arrowKeys.left.code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.left.code)" />
+                  <KeyButton :key-def="layout.arrowKeys.down" :key-health="keys[layout.arrowKeys.down.code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.down.code)" />
+                  <KeyButton :key-def="layout.arrowKeys.right" :key-health="keys[layout.arrowKeys.right.code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.right.code)" />
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 右侧：数字小键盘区域 -->
-          <div class="numpad-section">
-            <!-- 小键盘功能键行 (Num, /, *, -) - 占位行，与 PrtSc 行对齐 -->
+          <!-- 右侧：数字小键盘区域（仅 104/98 布局） -->
+          <div v-if="layout.hasNumpad" class="numpad-section">
+            <!-- 顶部行：98 为 Home/End/PgUp/PgDn（数字区正上方，与 F1-F12 同行）；104 为空占位 -->
             <div class="function-row">
-              <!-- 空白占位，使小键盘主体与 Insert 行对齐 -->
+              <div v-if="!layout.showNavSection" class="key-group">
+                <KeyButton v-for="key in layout.navigationFunctionRow" :key="key.code" :key-def="key"
+                  :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
+              </div>
             </div>
 
             <!-- 小键盘主体区域 -->
             <div class="numpad-body">
               <!-- 第一行: Num / * - -->
               <div class="key-row">
-                <KeyButton v-for="key in keyboardLayout.numpadFunctionRow" :key="key.code" :key-def="key"
+                <KeyButton v-for="key in layout.numpadFunctionRow" :key="key.code" :key-def="key"
                   :key-health="keys[key.code]" :is-edit-mode="isEditMode" @click="emit('keyClick', key.code)" />
               </div>
 
@@ -246,78 +263,82 @@ onUnmounted(() => {
               <div class="numpad-grid">
                 <!-- 第1行: 7 8 9 -->
                 <div class="numpad-cell" style="grid-area: r1c1;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row1[0]"
-                    :key-health="keys[keyboardLayout.numpadArea.row1[0].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row1[0].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row1[0]" :key-health="keys[layout.numpadArea.row1[0].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row1[0].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r1c2;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row1[1]"
-                    :key-health="keys[keyboardLayout.numpadArea.row1[1].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row1[1].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row1[1]" :key-health="keys[layout.numpadArea.row1[1].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row1[1].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r1c3;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row1[2]"
-                    :key-health="keys[keyboardLayout.numpadArea.row1[2].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row1[2].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row1[2]" :key-health="keys[layout.numpadArea.row1[2].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row1[2].code)" />
                 </div>
                 <!-- + 键跨2行 -->
                 <div class="numpad-cell numpad-tall" style="grid-area: plus;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.plus"
-                    :key-health="keys[keyboardLayout.numpadArea.plus.code]" :is-edit-mode="isEditMode" :is-tall="true"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.plus.code)" />
+                  <KeyButton :key-def="layout.numpadArea.plus" :key-health="keys[layout.numpadArea.plus.code]"
+                    :is-edit-mode="isEditMode" :is-tall="true" @click="emit('keyClick', layout.numpadArea.plus.code)" />
                 </div>
 
                 <!-- 第2行: 4 5 6 -->
                 <div class="numpad-cell" style="grid-area: r2c1;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row2[0]"
-                    :key-health="keys[keyboardLayout.numpadArea.row2[0].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row2[0].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row2[0]" :key-health="keys[layout.numpadArea.row2[0].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row2[0].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r2c2;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row2[1]"
-                    :key-health="keys[keyboardLayout.numpadArea.row2[1].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row2[1].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row2[1]" :key-health="keys[layout.numpadArea.row2[1].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row2[1].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r2c3;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row2[2]"
-                    :key-health="keys[keyboardLayout.numpadArea.row2[2].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row2[2].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row2[2]" :key-health="keys[layout.numpadArea.row2[2].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row2[2].code)" />
                 </div>
 
                 <!-- 第3行: 1 2 3 -->
                 <div class="numpad-cell" style="grid-area: r3c1;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row3[0]"
-                    :key-health="keys[keyboardLayout.numpadArea.row3[0].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row3[0].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row3[0]" :key-health="keys[layout.numpadArea.row3[0].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row3[0].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r3c2;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row3[1]"
-                    :key-health="keys[keyboardLayout.numpadArea.row3[1].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row3[1].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row3[1]" :key-health="keys[layout.numpadArea.row3[1].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row3[1].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: r3c3;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row3[2]"
-                    :key-health="keys[keyboardLayout.numpadArea.row3[2].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row3[2].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row3[2]" :key-health="keys[layout.numpadArea.row3[2].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row3[2].code)" />
                 </div>
                 <!-- Enter 键跨2行 -->
                 <div class="numpad-cell numpad-tall" style="grid-area: enter;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.enter"
-                    :key-health="keys[keyboardLayout.numpadArea.enter.code]" :is-edit-mode="isEditMode" :is-tall="true"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.enter.code)" />
+                  <KeyButton :key-def="layout.numpadArea.enter" :key-health="keys[layout.numpadArea.enter.code]"
+                    :is-edit-mode="isEditMode" :is-tall="true"
+                    @click="emit('keyClick', layout.numpadArea.enter.code)" />
                 </div>
 
                 <!-- 第4行: 0 (跨2列) . -->
                 <div class="numpad-cell numpad-wide" style="grid-area: zero;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row4[0]"
-                    :key-health="keys[keyboardLayout.numpadArea.row4[0].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row4[0].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row4[0]" :key-health="keys[layout.numpadArea.row4[0].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row4[0].code)" />
                 </div>
                 <div class="numpad-cell" style="grid-area: dot;">
-                  <KeyButton :key-def="keyboardLayout.numpadArea.row4[1]"
-                    :key-health="keys[keyboardLayout.numpadArea.row4[1].code]" :is-edit-mode="isEditMode"
-                    @click="emit('keyClick', keyboardLayout.numpadArea.row4[1].code)" />
+                  <KeyButton :key-def="layout.numpadArea.row4[1]" :key-health="keys[layout.numpadArea.row4[1].code]"
+                    :is-edit-mode="isEditMode" @click="emit('keyClick', layout.numpadArea.row4[1].code)" />
                 </div>
+              </div>
+            </div>
+
+            <!-- 98 布局：方向键嵌入数字区左下凹槽（→ 位于数字 1 正下方空位） -->
+            <div v-if="!layout.showNavSection" class="arrow-cluster">
+              <div class="arrow-row-up">
+                <KeyButton :key-def="layout.arrowKeys.up" :key-health="keys[layout.arrowKeys.up.code]"
+                  :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.up.code)" />
+              </div>
+              <div class="arrow-row-bottom">
+                <KeyButton :key-def="layout.arrowKeys.left" :key-health="keys[layout.arrowKeys.left.code]"
+                  :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.left.code)" />
+                <KeyButton :key-def="layout.arrowKeys.down" :key-health="keys[layout.arrowKeys.down.code]"
+                  :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.down.code)" />
+                <KeyButton :key-def="layout.arrowKeys.right" :key-health="keys[layout.arrowKeys.right.code]"
+                  :is-edit-mode="isEditMode" @click="emit('keyClick', layout.arrowKeys.right.code)" />
               </div>
             </div>
           </div>
@@ -336,6 +357,19 @@ onUnmounted(() => {
 
 .keyboard-editing {
   user-select: none;
+}
+
+/* 测试模式：隐藏已记录的损坏/更换状态颜色，让按键按下反馈更清晰（按下中的键保留高亮） */
+.keyboard-testing.keyboard-test-hide-status :deep(.key-button.key-damaged:not(.key-test-pressed)),
+.keyboard-testing.keyboard-test-hide-status :deep(.key-button.key-replaced:not(.key-test-pressed)) {
+  background: var(--key-bg);
+  color: var(--key-text);
+  box-shadow: var(--key-shadow);
+}
+
+/* 测试模式：同时隐藏损坏次数徽标 */
+.keyboard-testing.keyboard-test-hide-status :deep(.damage-count-badge) {
+  display: none;
 }
 
 :deep(.key-button.key-drag-source) {
@@ -366,19 +400,62 @@ onUnmounted(() => {
 
 .keyboard-layout {
   display: flex;
-  gap: calc(var(--key-size) * 0.5);
 }
 
+/* 主键盘区与导航区之间的间距 */
 .main-section {
   display: flex;
   flex-direction: column;
   gap: calc(var(--key-size) * 0.4);
+  margin-right: calc(var(--key-size) * 0.5);
 }
 
+/* 导航区与数字区之间的间距（默认 0.5 键宽） */
 .nav-section {
   display: flex;
   flex-direction: column;
   gap: calc(var(--key-size) * 0.4);
+  margin-right: calc(var(--key-size) * 0.5);
+}
+
+/* 98 紧凑配列：主键盘区与数字区之间留 40px（= 键宽 - 键距），
+   配合方向键簇的偏移，使 ←↓→ 与右侧数字区 0、↑ 与数字 1 均保持 4px 键距 */
+.layout-98 .main-section {
+  margin-right: calc(var(--key-size) - var(--key-gap));
+}
+
+/* 98：数字区作为方向键簇的定位上下文 */
+.layout-98 .numpad-section {
+  position: relative;
+}
+
+/* 98：方向键嵌入主区与数字区之间的凹槽。
+   left = -2 键宽 - 2 键距（= -96px），使得：
+   - ← 与右 Ctrl 右缘保持 4px 键距；
+   - ↑ 与右 Shift 右缘、数字 1 左缘均保持 4px 键距；
+   - → 位于数字 1 正下方、与数字 0 保持 4px 键距。
+   任意两个键位均不重叠，符合实体 98 配列视觉。 */
+.layout-98 .arrow-cluster {
+  position: absolute;
+  left: calc(-2 * var(--key-size) - 2 * var(--key-gap));
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--key-gap);
+}
+
+/* 98：收窄 F 键组间隔，使功能行与数字行等宽、数字区更贴近主键盘区 */
+.layout-98 .function-spacer-large {
+  width: 24px;
+}
+
+.layout-98 .function-spacer-small {
+  width: 16px;
+}
+
+/* 87 无数字区：导航区为最后一列，去掉多余右边距 */
+.layout-87 .nav-section {
+  margin-right: 0;
 }
 
 .numpad-section {
@@ -462,6 +539,16 @@ onUnmounted(() => {
     "r2c1 r2c2 r2c3 plus"
     "r3c1 r3c2 r3c3 enter"
     "zero zero dot  enter";
+}
+
+/* 98 布局：数字区 0 键为单宽并右移一格（0、. 从第 1、2 列移到第 2、3 列），
+   使数字 1 正下方（第 1 列底部）空出，与主键盘区底部的收窄区域共同形成方向键嵌入的凹槽 */
+.layout-98 .numpad-grid {
+  grid-template-areas:
+    "r1c1 r1c2 r1c3 plus"
+    "r2c1 r2c2 r2c3 plus"
+    "r3c1 r3c2 r3c3 enter"
+    "...  zero dot  enter";
 }
 
 .numpad-cell {

@@ -27,10 +27,17 @@ export interface KeyHealth {
   history: DamageEvent[]  // 所有损坏事件，按时间顺序排列；HEALTHY 时为空数组
 }
 
+// 键盘布局类型
+// - 104：全尺寸（含数字小键盘）
+// - 98：1800 紧凑配列（含数字小键盘，导航键竖排）
+// - 87：无数字小键盘（Tenkeyless）
+export type KeyboardLayoutType = '104' | '98' | '87'
+
 // 键盘健康记录表
 export interface KeyboardHealthRecord {
   id: string
   name: string
+  layout?: KeyboardLayoutType  // 键盘布局；旧数据可能缺失，加载时需用户手动选择
   createdAt: string
   updatedAt: string
   keys: Record<string, KeyHealth>
@@ -77,6 +84,11 @@ export interface NumpadArea {
 
 // 完整键盘布局
 export interface KeyboardLayout {
+  id: KeyboardLayoutType
+  name: string
+  description: string
+  hasNumpad: boolean  // 是否包含数字小键盘（87 键为 false）
+  showNavSection: boolean  // 是否渲染导航区（编辑键 + 方向键）；98 布局暂不渲染
   functionRow: FunctionRow
   mainArea: KeyboardRow[]
   navigationFunctionRow: KeyDefinition[]
