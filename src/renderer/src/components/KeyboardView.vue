@@ -2,6 +2,7 @@
 import { onUnmounted, ref, computed, provide } from 'vue'
 import KeyButton from './KeyButton.vue'
 import { KeyStatus, type KeyHealth, type KeyboardLayout } from '../types'
+import { buildAllKeyFunctionLabelMap } from '../data/keyboardLayout'
 
 const props = defineProps<{
   keys: Record<string, KeyHealth>
@@ -12,6 +13,8 @@ const props = defineProps<{
   testPressed?: Record<string, boolean>
   testPressCounts?: Record<string, number>
   testHideStatus?: boolean
+  // 按键功能修改（驱动改键）：key = 物理键位 code，value = 该键位发送的功能 code
+  remap?: Record<string, string>
 }>()
 
 const emit = defineEmits<{
@@ -25,6 +28,12 @@ provide('testState', computed(() => ({
   pressedKeys: props.testPressed || {},
   pressCounts: props.testPressCounts || {},
   hideStatus: props.testHideStatus || false
+})))
+
+// 改键状态：物理键位 code → 其发送的功能 code 与标签（KeyButton 展示改键后的功能名）
+provide('remapState', computed(() => ({
+  remap: props.remap || {},
+  functionLabels: buildAllKeyFunctionLabelMap()
 })))
 
 const keyboardRef = ref<HTMLElement | null>(null)

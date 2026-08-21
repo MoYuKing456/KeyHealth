@@ -18,6 +18,9 @@ declare global {
       deleteRecord(id: string): Promise<boolean>
       onTestKeyEvent(callback: (data: { type: 'keydown' | 'keyup'; code: string; repeat?: boolean }) => void): () => void
       setTestMode(active: boolean): void
+      setBackgroundRecording(active: boolean): Promise<boolean>
+      getKeyStats(recordId: string): Promise<Record<string, number> | null>
+      saveKeyStats(recordId: string, recordName: string, counts: Record<string, number>): Promise<Record<string, number>>
       getConfig(): Promise<AppConfig>
       saveConfig(config: AppConfig): Promise<void>
     }

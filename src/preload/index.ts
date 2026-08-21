@@ -31,6 +31,19 @@ const api = {
   setTestMode(active: boolean){
     return ipcRenderer.send('test-mode', active)
   },
+  // 后台记录开关：开启后主进程安装系统级键盘钩子，窗口不在前台也持续转发按键事件
+  // 返回是否成功开启（钩子安装失败时返回 false）
+  setBackgroundRecording(active: boolean){
+    return ipcRenderer.invoke('set-background-recording', active)
+  },
+  // 读取某记录的累计按键次数（无记录返回 null）
+  getKeyStats(recordId: string){
+    return ipcRenderer.invoke('get-key-stats', recordId)
+  },
+  // 将本次会话的按下次数累加到该记录并保存，返回合并后的累计次数
+  saveKeyStats(recordId: string, recordName: string, counts: Record<string, number>){
+    return ipcRenderer.invoke('save-key-stats', { recordId, recordName, counts })
+  },
   getConfig(){
     return ipcRenderer.invoke('get-config')
   },

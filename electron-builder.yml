@@ -13,6 +13,7 @@ files:
   - '!keyhealthconfig.json'
 asarUnpack:
   - resources/**
+  - '**/*.node'
 win:
   executableName: keyhealth
 nsis:

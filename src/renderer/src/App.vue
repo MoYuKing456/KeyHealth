@@ -5,8 +5,9 @@ import CreateRecordModal from './components/CreateRecordModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import SelectLayoutModal from './components/SelectLayoutModal.vue'
 import DeleteRecordModal from './components/DeleteRecordModal.vue'
+import RemapModal from './components/RemapModal.vue'
 import { EventType, KeyStatus, type KeyboardHealthRecord, type KeyHealth, type KeyboardLayoutType } from './types'
-import { getKeyboardLayout, getLayoutKeyCodes, buildKeyLabelMap, getDisabledLayoutReasons, layoutOptions } from './data/keyboardLayout'
+import { getKeyboardLayout, getLayoutKeyCodes, buildKeyLabelMap, getDisabledLayoutReasons, layoutOptions, resolveRemappedCode } from './data/keyboardLayout'
 
 // 主题 — 从预加载脚本同步初始状态（已由 index.html 内联脚本提前应用到 DOM）
 const isDark = ref(window.__INITIAL_THEME__ === 'dark')
@@ -45,8 +46,12 @@ const currentRecordId = ref<string>('')
 // 编辑模式
 const isEditMode = ref(false)
 
-// 测试模式（按键可视化 + 按下次数统计；退出后清空，不做本地保存）
+// 测试模式（按键可视化 + 按下次数统计；退出后把本次记录保存到累计统计）
 const isTestMode = ref(false)
+// 后台记录：开启后即使窗口不在前台也持续记录全局按键（系统级键盘钩子）
+const testBackgroundRecording = ref(false)
+// 后台记录钩子启动失败标记（用于横幅提示）
+const backgroundHookFailed = ref(false)
 // 测试时隐藏已记录的损坏/更换状态颜色（默认开启，保证按下反馈清晰）
 const testHideStatus = ref(true)
 // 当前按住的键（event.code -> true）
@@ -89,6 +94,11 @@ const changeLog = ref<ChangeOp[]>([])
 
 // 排行视图切换
 const showRanking = ref(false)
+
+// 按键次数统计视图切换（主页按钮开启，展示过往记录累加的按下次数）
+const showKeyStats = ref(false)
+// 当前记录累计按键次数（从 userData/stats 读取，随每次记录逐渐累加）
+const currentKeyStats = ref<Record<string, number>>({})
 
 // 构建 keyCode → label 的查找表（按当前记录的布局）
 const keyLabelMap = computed(() => {
@@ -146,6 +156,29 @@ const maxRankCount = computed(() => {
   return rankingData.value[0].count
 })
 
+// 按键统计：累计总次数
+const keyStatsTotal = computed(() =>
+  Object.values(currentKeyStats.value).reduce((sum, n) => sum + n, 0)
+)
+
+// 按键统计：按次数降序排列（含可读标签，复用排行标签规则）
+const keyStatsData = computed(() =>
+  Object.entries(currentKeyStats.value)
+    .filter(([, n]) => n > 0)
+    .map(([keyCode, count]) => ({
+      keyCode,
+      label: getRankingLabel(keyCode, keyLabelMap.value[keyCode] || keyCode),
+      count
+    }))
+    .sort((a, b) => b.count - a.count)
+)
+
+// 按键统计：最大值（用于比例计算）
+const maxKeyStatsCount = computed(() => {
+  if (keyStatsData.value.length === 0) return 1
+  return keyStatsData.value[0].count
+})
+
 // 当前选中的记录
 const currentRecord = computed(() => {
   return records.value.find(r => r.id === currentRecordId.value)
@@ -165,6 +198,37 @@ const currentLayout = computed<KeyboardLayoutType>(() => {
 const showSelectLayoutModal = ref(false)
 const layoutModalRecord = ref<KeyboardHealthRecord | null>(null)
 const layoutModalPreselect = ref<KeyboardLayoutType>('104')
+
+// 按键功能修改（改键）模态框状态
+const showRemapModal = ref(false)
+const remapModalRecord = ref<KeyboardHealthRecord | null>(null)
+
+// 打开改键模态框
+const openRemapModal = (): void => {
+  if (!currentRecord.value || isEditMode.value || isTestMode.value) return
+  remapModalRecord.value = currentRecord.value
+  showRemapModal.value = true
+}
+
+// 当前记录已改键的按键数量（顶栏「改键」按钮显示）
+const currentRemapCount = computed(() => Object.keys(currentRecord.value?.remap || {}).length)
+
+// 保存改键配置：写回当前记录并持久化；健康数据（keys）保持不动，仅更新 remap 与 updatedAt
+const handleSaveRemap = async (remap: Record<string, string>): Promise<void> => {
+  const record = remapModalRecord.value
+  if (!record) return
+  record.remap = Object.keys(remap).length > 0 ? remap : undefined
+  record.updatedAt = new Date().toISOString()
+  const payload = JSON.parse(JSON.stringify(record))
+  try {
+    await window.api.updateRecord(payload)
+    console.log('[改键已保存]', record.name, record.remap)
+  } catch (err) {
+    console.error('[改键保存失败]', err)
+  }
+  showRemapModal.value = false
+  remapModalRecord.value = null
+}
 
 // 打开布局选择模态框
 const openSelectLayoutModal = (record: KeyboardHealthRecord) => {
@@ -198,10 +262,10 @@ const handleSelectLayout = async (layout: KeyboardLayoutType) => {
   layoutModalRecord.value = null
 }
 
-// 布局选择模态框的禁用原因（如旧数据有小键盘记录则 87 不可选）
+// 布局选择模态框的禁用原因（如旧数据有小键盘记录则 87 不可选；改键冲突的布局也不可选）
 const layoutDisabledReasons = computed(() => {
   if (!layoutModalRecord.value) return {}
-  return getDisabledLayoutReasons(layoutModalRecord.value.keys)
+  return getDisabledLayoutReasons(layoutModalRecord.value.keys, layoutModalRecord.value.remap)
 })
 
 // 顶栏布局按钮文案
@@ -255,6 +319,8 @@ const selectRecord = (id: string) => {
   saveAppConfig()
   // 旧数据（无布局）提示手动选择布局
   checkLayoutForRecord(id)
+  // 若统计视图正开着，切换记录后重新加载
+  if (showKeyStats.value) loadKeyStats()
 }
 
 // 打开删除确认模态框（传入要删除的记录）
@@ -328,7 +394,9 @@ const normalizeTestCode = (event: KeyboardEvent): string => {
 // 仅阻止页面默认行为（空格/方向键滚动等），避免测试时页面滚动；显示交给主进程转发通道
 const handleTestKeyPreventDefault = (event: KeyboardEvent) => {
   const code = normalizeTestCode(event)
-  if (!layoutKeyCodes.value.has(code)) return
+  // 改键解析：收到的功能码先映射回物理键位，再判断是否属于当前布局
+  const resolved = resolveRemappedCode(currentRecord.value?.remap, code)
+  if (!layoutKeyCodes.value.has(resolved)) return
   event.preventDefault()
 }
 
@@ -342,7 +410,8 @@ let unsubscribeTestKeys: (() => void) | null = null
 
 const handleRawTestKey = (data: { type: 'keydown' | 'keyup'; code: string; repeat?: boolean }) => {
   if (!isTestMode.value) return
-  const code = data.code
+  // 改键解析：把收到的功能码反向映射到物理键位码（如改键 Delete→PrintScreen，收到 PrintScreen 记为 Delete）
+  const code = resolveRemappedCode(currentRecord.value?.remap, data.code)
   if (!layoutKeyCodes.value.has(code)) return
   if (data.type === 'keydown') {
     // 忽略长按自动重复，只计有效按压
@@ -358,19 +427,19 @@ const toggleTestMode = () => {
   isTestMode.value = !isTestMode.value
   if (isTestMode.value) {
     showRanking.value = false  // 测试模式自动关闭排行
+    showKeyStats.value = false // 测试模式自动关闭统计视图
     window.api.setTestMode?.(true)
     unsubscribeTestKeys = window.api.onTestKeyEvent?.(handleRawTestKey) ?? null
     window.addEventListener('keydown', handleTestKeyPreventDefault)
     window.addEventListener('blur', clearTestPressed)
   } else {
+    // 退出测试模式：先结束本次记录会话（停后台钩子、保存次数、清空）
+    endRecordingSession()
     window.api.setTestMode?.(false)
     unsubscribeTestKeys?.()
     unsubscribeTestKeys = null
     window.removeEventListener('keydown', handleTestKeyPreventDefault)
     window.removeEventListener('blur', clearTestPressed)
-    // 退出后清空本次测试的按下次数与按住状态（不做本地保存）
-    Object.keys(testPressCounts).forEach(code => delete testPressCounts[code])
-    Object.keys(testPressed).forEach(code => delete testPressed[code])
   }
 }
 
@@ -378,6 +447,90 @@ const toggleTestMode = () => {
 const resetTestCounts = () => {
   Object.keys(testPressCounts).forEach(code => delete testPressCounts[code])
   Object.keys(testPressed).forEach(code => delete testPressed[code])
+}
+
+// ---- 后台记录 & 按键统计 ----
+
+// 将本次会话的按下次数累加到当前记录的累计统计并保存
+const saveSessionCounts = async (): Promise<void> => {
+  if (!currentRecord.value) return
+  const counts: Record<string, number> = {}
+  for (const [code, n] of Object.entries(testPressCounts)) {
+    if (n > 0) counts[code] = n
+  }
+  if (Object.keys(counts).length === 0) return
+  try {
+    const merged = await window.api.saveKeyStats(currentRecord.value.id, currentRecord.value.name, counts)
+    // 若统计视图正开着，即时刷新
+    if (showKeyStats.value) currentKeyStats.value = merged
+    console.log('[按键统计] 已保存本次记录', counts)
+  } catch (err) {
+    console.error('[按键统计] 保存本次记录失败', err)
+  }
+}
+
+// 后台记录开关切换：开启时安装全局钩子，关闭时保存本次会话并清空
+const handleBackgroundRecordingToggle = async (event: Event): Promise<void> => {
+  const on = (event.target as HTMLInputElement).checked
+  if (on) {
+    const ok = await window.api.setBackgroundRecording?.(true)
+    if (ok === false) {
+      backgroundHookFailed.value = true
+      return // 钩子启动失败：回滚开关，不结束会话、不保存
+    }
+    backgroundHookFailed.value = false
+    testBackgroundRecording.value = true
+  } else {
+    testBackgroundRecording.value = false
+    await window.api.setBackgroundRecording?.(false)
+    // 退出后台记录：保存本次会话的按键次数并清空
+    await saveSessionCounts()
+    resetTestCounts()
+  }
+}
+
+// 结束一次记录会话（退出测试模式时调用）：停后台钩子、保存本次次数、清空
+const endRecordingSession = async (): Promise<void> => {
+  if (testBackgroundRecording.value) {
+    testBackgroundRecording.value = false
+    await window.api.setBackgroundRecording?.(false)
+  }
+  await saveSessionCounts()
+  resetTestCounts()
+}
+
+// 读取当前记录的累计按键次数
+const loadKeyStats = async (): Promise<void> => {
+  if (!currentRecord.value) {
+    currentKeyStats.value = {}
+    return
+  }
+  try {
+    const stats = await window.api.getKeyStats(currentRecord.value.id)
+    currentKeyStats.value = stats || {}
+  } catch (err) {
+    console.warn('[按键统计] 读取失败', err)
+    currentKeyStats.value = {}
+  }
+}
+
+// 切换按键统计视图
+const toggleKeyStats = (): void => {
+  if (isEditMode.value || isTestMode.value) return
+  showKeyStats.value = !showKeyStats.value
+  if (showKeyStats.value) {
+    showRanking.value = false
+    loadKeyStats()
+  }
+}
+
+// 切换排行视图
+const toggleRanking = (): void => {
+  if (isEditMode.value || isTestMode.value) return
+  showRanking.value = !showRanking.value
+  if (showRanking.value) {
+    showKeyStats.value = false
+  }
 }
 
 // 处理按键点击（编辑模式）
@@ -603,9 +756,10 @@ const initUserData = async () => {
   }
 }
 
-// 组件卸载时兜底清理测试模式监听
+// 组件卸载时兜底清理测试模式监听与后台钩子
 onUnmounted(() => {
   window.api.setTestMode?.(false)
+  window.api.setBackgroundRecording?.(false)
   if (isTestMode.value) {
     window.removeEventListener('keydown', handleTestKeyPreventDefault)
     window.removeEventListener('blur', clearTestPressed)
@@ -687,6 +841,17 @@ onUnmounted(() => {
             </svg>
             <span>{{ layoutButtonLabel }}</span>
           </button>
+
+          <!-- 按键功能修改（改键） -->
+          <button v-if="currentRecord" class="layout-tag remap-tag" :disabled="isEditMode || isTestMode"
+            :title="currentRemapCount > 0 ? `已修改 ${currentRemapCount} 个按键 · 点击管理` : '修改按键功能（驱动改键）'"
+            @click="openRemapModal">
+            <svg class="layout-tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 8h16M9 4l-1 4m7-4l1 4M4 12h6l3-2 2 1-3 2-2-1-6 3 2 6" />
+              <path d="M15 14l4 3-4 3m4-6l-4 3" />
+            </svg>
+            <span>{{ currentRemapCount > 0 ? `改键 ${currentRemapCount}` : '改键' }}</span>
+          </button>
         </div>
 
         <!-- 右侧：主题切换 + 操作按钮 -->
@@ -694,11 +859,23 @@ onUnmounted(() => {
           <!-- 排行切换 -->
           <button class="theme-toggle" :class="{ 'toggle-active': showRanking }"
             :title="showRanking ? '返回键盘视图' : '查看损坏排行'" :disabled="isEditMode || isTestMode"
-            @click="showRanking = !showRanking">
+            @click="toggleRanking">
             <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="20" x2="18" y2="10" />
               <line x1="12" y1="20" x2="12" y2="4" />
               <line x1="6" y1="20" x2="6" y2="14" />
+            </svg>
+          </button>
+
+          <!-- 按键统计切换 -->
+          <button class="theme-toggle" :class="{ 'toggle-active': showKeyStats }"
+            :title="showKeyStats ? '返回键盘视图' : '查看累计按键次数'" :disabled="isEditMode || isTestMode"
+            @click="toggleKeyStats">
+            <svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="4" y1="9" x2="20" y2="9" />
+              <line x1="4" y1="15" x2="20" y2="15" />
+              <line x1="10" y1="3" x2="8" y2="21" />
+              <line x1="16" y1="3" x2="14" y2="21" />
             </svg>
           </button>
 
@@ -790,8 +967,12 @@ onUnmounted(() => {
               </svg>
             </div>
             <div class="test-banner-text">
-              <span class="test-banner-title">测试模式已开启</span>
-              <span class="test-banner-desc">按下实体键盘按键即可在面板上高亮显示并记录次数；退出后自动清空，不会保存</span>
+              <div class="test-banner-title-row">
+                <span class="test-banner-title">测试模式已开启</span>
+                <span v-if="testBackgroundRecording" class="bg-recording-badge">● 后台记录中</span>
+                <span v-if="backgroundHookFailed" class="bg-recording-error">后台记录启动失败</span>
+              </div>
+              <span class="test-banner-desc">按下实体键盘按键即可在面板上高亮显示并记录次数；退出后自动保存到累计统计</span>
               <span class="test-hint-trigger" tabindex="0">
                 <svg class="test-hint-trigger-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                   stroke-width="2">
@@ -817,6 +998,14 @@ onUnmounted(() => {
                   <span class="test-switch-thumb"></span>
                 </span>
                 <span class="test-switch-label">隐藏状态颜色</span>
+              </label>
+              <label class="test-switch"
+                title="开启后即使窗口不在前台，也会记录全局按键次数；退出后台记录或测试模式时自动保存">
+                <input type="checkbox" :checked="testBackgroundRecording" @change="handleBackgroundRecordingToggle" />
+                <span class="test-switch-track">
+                  <span class="test-switch-thumb"></span>
+                </span>
+                <span class="test-switch-label">后台记录</span>
               </label>
               <button class="test-reset-btn" title="清空本次测试的按下次数" @click="resetTestCounts">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -857,8 +1046,8 @@ onUnmounted(() => {
 
       <!-- 有键盘时的内容 -->
       <template v-else>
-        <!-- 状态统计和图例（测试模式下隐藏，改用测试横幅） -->
-        <div v-if="!showRanking && !isTestMode" class="info-bar">
+        <!-- 状态统计和图例（测试/排行/统计视图下隐藏） -->
+        <div v-if="!showRanking && !showKeyStats && !isTestMode" class="info-bar">
           <div class="legend">
             <div class="legend-item">
               <div class="legend-dot healthy"></div>
@@ -892,14 +1081,14 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 键盘视图 / 排行视图 -->
-        <KeyboardView v-if="!showRanking" :keys="displayKeys" :is-edit-mode="isEditMode"
+        <!-- 键盘视图 / 排行视图 / 统计视图 -->
+        <KeyboardView v-if="!showRanking && !showKeyStats" :keys="displayKeys" :is-edit-mode="isEditMode"
           :layout="getKeyboardLayout(currentLayout)" :test-mode="isTestMode" :test-pressed="testPressed"
-          :test-press-counts="testPressCounts" :test-hide-status="testHideStatus" @key-click="handleKeyClick"
-          @switch-move="handleSwitchMove" />
+          :test-press-counts="testPressCounts" :test-hide-status="testHideStatus" :remap="currentRecord?.remap"
+          @key-click="handleKeyClick" @switch-move="handleSwitchMove" />
 
         <!-- 损坏排行柱状图 -->
-        <div v-else class="ranking-view">
+        <div v-else-if="showRanking" class="ranking-view">
           <div class="ranking-header">
             <h3 class="ranking-title">按键损坏排行</h3>
             <span class="ranking-subtitle">按累计损坏次数降序排列</span>
@@ -919,6 +1108,41 @@ onUnmounted(() => {
               <div class="ranking-bar-track">
                 <div class="ranking-bar-fill" :class="item.status === 'replaced' ? 'bar-replaced' : 'bar-damaged'"
                   :style="{ width: (item.count / maxRankCount * 100) + '%' }">
+                  <span class="ranking-bar-count">{{ item.count }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 按键次数统计视图 -->
+        <div v-else-if="showKeyStats" class="ranking-view stats-view">
+          <div class="ranking-header">
+            <h3 class="ranking-title">按键次数统计</h3>
+            <span class="ranking-subtitle">累计按下次数 · 随每次记录逐渐累加</span>
+            <div class="stats-header-total">
+              <span class="stats-header-total-value">{{ keyStatsTotal }}</span>
+              <span class="stats-header-total-label">累计总次数</span>
+            </div>
+          </div>
+
+          <div v-if="keyStatsData.length === 0" class="ranking-empty">
+            <svg class="ranking-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <line x1="4" y1="9" x2="20" y2="9" />
+              <line x1="4" y1="15" x2="20" y2="15" />
+              <line x1="10" y1="3" x2="8" y2="21" />
+              <line x1="16" y1="3" x2="14" y2="21" />
+            </svg>
+            <p>暂无按键统计数据<br />开启测试模式记录后会自动累加</p>
+          </div>
+
+          <div v-else class="ranking-list">
+            <div v-for="(item, idx) in keyStatsData" :key="item.keyCode" class="ranking-row">
+              <span class="ranking-index" :class="{ 'top-three': idx < 3 }">{{ idx + 1 }}</span>
+              <span class="ranking-key-label" :title="item.label">{{ item.label }}</span>
+              <div class="ranking-bar-track">
+                <div class="ranking-bar-fill stats-bar-fill"
+                  :style="{ width: (item.count / maxKeyStatsCount * 100) + '%' }">
                   <span class="ranking-bar-count">{{ item.count }}</span>
                 </div>
               </div>
@@ -947,6 +1171,12 @@ onUnmounted(() => {
     <SelectLayoutModal v-if="showSelectLayoutModal" :record-name="layoutModalRecord?.name || ''"
       :current-layout="layoutModalPreselect" :disabled-reasons="layoutDisabledReasons" @select="handleSelectLayout"
       @cancel="showSelectLayoutModal = false" />
+
+    <!-- 按键功能修改模态框（改键） -->
+    <RemapModal v-if="showRemapModal && remapModalRecord" :record-name="remapModalRecord.name"
+      :layout-type="isLayoutValid(remapModalRecord.layout) ? remapModalRecord.layout! : '104'"
+      :remap="remapModalRecord.remap || {}" :keys="remapModalRecord.keys" @save="handleSaveRemap"
+      @cancel="showRemapModal = false" />
 
     <!-- 确认保存模态框 -->
     <ConfirmModal v-if="showConfirmModal" title="保存更改" :changes="changesSummary" @save="saveChanges"
@@ -1231,6 +1461,11 @@ onUnmounted(() => {
 
 .layout-tag-pending:hover:not(:disabled) {
   border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* 改键标签：图标用主题色，与布局标签区分 */
+.remap-tag .layout-tag-icon {
   color: var(--color-accent);
 }
 
@@ -1915,5 +2150,77 @@ onUnmounted(() => {
   color: #fff;
   padding-right: 6px;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* ========== 按键次数统计视图 ========== */
+/* 统计条使用程序主色（靛蓝），与排行视图的红/橙区分 */
+.stats-bar-fill {
+  background: linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);
+}
+
+/* 统计头部右侧的总次数 */
+.stats-header-total {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.stats-header-total-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-header-total-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+/* ========== 测试横幅：后台记录状态 ========== */
+.test-banner-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 后台记录进行中徽标（呼吸闪烁） */
+.bg-recording-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-test);
+  background: var(--color-test-light);
+  border: 1px solid var(--color-test-border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  line-height: 1.4;
+  animation: bg-recording-pulse 2s ease-in-out infinite;
+}
+
+@keyframes bg-recording-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 后台记录启动失败提示 */
+.bg-recording-error {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-damaged);
+  background: var(--color-damaged-light);
+  border-radius: 6px;
+  padding: 2px 8px;
+  line-height: 1.4;
 }
 </style>

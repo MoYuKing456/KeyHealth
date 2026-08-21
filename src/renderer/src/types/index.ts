@@ -38,6 +38,10 @@ export interface KeyboardHealthRecord {
   id: string
   name: string
   layout?: KeyboardLayoutType  // 键盘布局；旧数据可能缺失，加载时需用户手动选择
+  // 按键功能修改（驱动改键）：key = 物理键位 code，value = 该键位当前发送的功能 code。
+  // 例如 { Delete: 'PrintScreen' } 表示 Delete 位置已被驱动改为发送 PrintScreen。
+  // 健康数据（keys）始终按物理键位 code 记录，改键不会移动或覆盖健康数据。
+  remap?: Record<string, string>
   createdAt: string
   updatedAt: string
   keys: Record<string, KeyHealth>

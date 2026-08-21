@@ -28,6 +28,21 @@ const isPressed = computed(() => isTestMode.value && !!testState?.value.pressedK
 // 本次测试中该键的按下次数
 const pressCount = computed(() => (isTestMode.value ? testState?.value.pressCounts[props.keyDef.code] || 0 : 0))
 
+// 改键状态（由 KeyboardView provide）：该物理键位被改成发送其它功能时显示功能名与标识
+interface RemapState {
+  remap: Record<string, string>
+  functionLabels: Record<string, string>
+}
+const remapState = inject<ComputedRef<RemapState> | null>('remapState', null)
+const remapInfo = computed(() => {
+  const to = remapState?.value.remap[props.keyDef.code]
+  if (!to) return null
+  return {
+    to,
+    toLabel: remapState?.value.functionLabels[to] || to
+  }
+})
+
 const showTooltip = ref(false)
 const isPinned = ref(false)
 const historyListRef = ref<HTMLElement | null>(null)
@@ -243,7 +258,10 @@ const formatKeyCode = (keyCode?: string) => {
       ]">
       <span v-if="damageCount > 0" class="damage-count-badge">{{ damageCount }}</span>
       <span v-if="isTestMode && pressCount > 0" class="test-count-badge">{{ pressCount }}</span>
-      <span class="key-label">{{ keyDef.label }}</span>
+      <span v-if="remapInfo" class="remap-badge" :title="`已由 ${keyDef.label || keyDef.code} 改为 ${remapInfo.toLabel}`">改</span>
+      <span class="key-label" :class="{ 'key-label-remapped': remapInfo }">
+        {{ remapInfo ? remapInfo.toLabel : keyDef.label }}
+      </span>
     </button>
 
     <!-- Tooltip -->
@@ -435,6 +453,32 @@ const formatKeyCode = (keyCode?: string) => {
   background: #4f46e5;
   color: #fff;
   letter-spacing: 0;
+}
+
+/* 改键标识：该物理键位已被修改为发送其它功能（左上角「改」角标） */
+.remap-badge {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 4px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 2;
+  background: var(--color-accent);
+  color: #fff;
+  letter-spacing: 0;
+}
+
+/* 改键后的功能名（主标签用主题色强调） */
+.key-label-remapped {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 /* 编辑模式 */

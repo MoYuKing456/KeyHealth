@@ -364,21 +364,210 @@ export function buildKeyLabelMap(layout: KeyboardLayout): Record<string, string>
  * 根据按键数据计算各布局的禁用原因。
  * 若某个布局不包含一个已有数据的键位（如 87 布局不含小键盘），则该布局不可选择，
  * 避免切换布局后已有健康数据被隐藏/丢失。
+ * 额外检查改键一致性：若改键后的功能在目标布局中已作为普通键位存在，会产生「两个按键发送同一功能」，
+ * 该布局同样不可选择。
  * 返回值为空字符串表示该布局可用。
  */
 export function getDisabledLayoutReasons(
-  keys: Record<string, KeyHealth>
+  keys: Record<string, KeyHealth>,
+  remap?: Record<string, string>
 ): Partial<Record<KeyboardLayoutType, string>> {
   const reasons: Partial<Record<KeyboardLayoutType, string>> = {}
   const dataCodes = Object.keys(keys).filter(code => keys[code] && keys[code].status !== KeyStatus.HEALTHY)
-  if (dataCodes.length === 0) return reasons
-
-  for (const type of (['104', '98', '87'] as KeyboardLayoutType[])) {
-    const layoutCodes = new Set(getLayoutKeyCodes(getKeyboardLayout(type)))
-    const missing = dataCodes.filter(code => !layoutCodes.has(code))
-    if (missing.length > 0) {
-      reasons[type] = `该布局不包含 ${missing.length} 个已有数据的键位（如 ${missing[0]}）`
+  if (dataCodes.length > 0) {
+    for (const type of (['104', '98', '87'] as KeyboardLayoutType[])) {
+      const layoutCodes = new Set(getLayoutKeyCodes(getKeyboardLayout(type)))
+      const missing = dataCodes.filter(code => !layoutCodes.has(code))
+      if (missing.length > 0) {
+        reasons[type] = `该布局不包含 ${missing.length} 个已有数据的键位（如 ${missing[0]}）`
+      }
     }
   }
+
+  // 改键一致性：目标布局若已包含某改键后的功能（且该功能不是改键来源本身），会变成重复按键
+  if (remap) {
+    const sources = new Set(Object.keys(remap))
+    for (const type of (['104', '98', '87'] as KeyboardLayoutType[])) {
+      if (reasons[type]) continue
+      const layoutCodes = new Set(getLayoutKeyCodes(getKeyboardLayout(type)))
+      for (const [, target] of Object.entries(remap)) {
+        // 目标功能是目标布局的普通键位、且该键位不是被改键的来源 → 重复
+        if (layoutCodes.has(target) && !sources.has(target)) {
+          reasons[type] = `该布局已包含「${getKeyFunctionLabel(target)}」键，与修改后的按键重复`
+          break
+        }
+      }
+    }
+  }
+
   return reasons
+}
+
+// ---------------------------------------------------------------------------
+// 按键功能修改（改键）辅助
+// ---------------------------------------------------------------------------
+
+/**
+ * 所有可映射的按键功能代码（含布局内键位 + 布局外常见键位）。
+ * 改键的目标功能从这些候选中选择；已被当前键盘使用的功能会自动排除。
+ */
+export const ALL_KEY_FUNCTIONS: { code: string; label: string }[] = [
+  // 功能键行
+  { code: 'Escape', label: 'Esc' },
+  ...Array.from({ length: 24 }, (_, i) => ({ code: `F${i + 1}`, label: `F${i + 1}` })),
+  // 数字行 + 主键盘区
+  { code: 'Backquote', label: '`' },
+  ...Array.from({ length: 10 }, (_, i) => ({ code: `Digit${(i + 1) % 10}`, label: `${(i + 1) % 10}` })),
+  { code: 'Minus', label: '-' },
+  { code: 'Equal', label: '=' },
+  { code: 'Backspace', label: 'Backspace' },
+  { code: 'Tab', label: 'Tab' },
+  ...'QWERTYUIOP'.split('').map(c => ({ code: `Key${c}`, label: c })),
+  { code: 'BracketLeft', label: '[' },
+  { code: 'BracketRight', label: ']' },
+  { code: 'Backslash', label: '\\' },
+  { code: 'CapsLock', label: 'Caps Lock' },
+  ...'ASDFGHJKL'.split('').map(c => ({ code: `Key${c}`, label: c })),
+  { code: 'Semicolon', label: ';' },
+  { code: 'Quote', label: "'" },
+  { code: 'Enter', label: 'Enter' },
+  { code: 'ShiftLeft', label: 'Shift L' },
+  ...'ZXCVBNM'.split('').map(c => ({ code: `Key${c}`, label: c })),
+  { code: 'Comma', label: ',' },
+  { code: 'Period', label: '.' },
+  { code: 'Slash', label: '/' },
+  { code: 'ShiftRight', label: 'Shift R' },
+  { code: 'ControlLeft', label: 'Ctrl L' },
+  { code: 'MetaLeft', label: 'Win L' },
+  { code: 'AltLeft', label: 'Alt L' },
+  { code: 'Space', label: 'Space' },
+  { code: 'AltRight', label: 'Alt R' },
+  { code: 'MetaRight', label: 'Win R' },
+  { code: 'ContextMenu', label: 'Menu' },
+  { code: 'ControlRight', label: 'Ctrl R' },
+  // 导航区
+  { code: 'PrintScreen', label: 'PrtSc' },
+  { code: 'ScrollLock', label: 'ScrLk' },
+  { code: 'Pause', label: 'Pause' },
+  { code: 'Insert', label: 'Insert' },
+  { code: 'Home', label: 'Home' },
+  { code: 'PageUp', label: 'PgUp' },
+  { code: 'Delete', label: 'Del' },
+  { code: 'End', label: 'End' },
+  { code: 'PageDown', label: 'PgDn' },
+  { code: 'ArrowUp', label: '↑' },
+  { code: 'ArrowLeft', label: '←' },
+  { code: 'ArrowDown', label: '↓' },
+  { code: 'ArrowRight', label: '→' },
+  // 数字小键盘
+  { code: 'NumLock', label: 'Num' },
+  { code: 'NumpadDivide', label: 'Num /' },
+  { code: 'NumpadMultiply', label: 'Num *' },
+  { code: 'NumpadSubtract', label: 'Num -' },
+  { code: 'Numpad7', label: 'Num 7' },
+  { code: 'Numpad8', label: 'Num 8' },
+  { code: 'Numpad9', label: 'Num 9' },
+  { code: 'NumpadAdd', label: 'Num +' },
+  { code: 'Numpad4', label: 'Num 4' },
+  { code: 'Numpad5', label: 'Num 5' },
+  { code: 'Numpad6', label: 'Num 6' },
+  { code: 'Numpad1', label: 'Num 1' },
+  { code: 'Numpad2', label: 'Num 2' },
+  { code: 'Numpad3', label: 'Num 3' },
+  { code: 'Numpad0', label: 'Num 0' },
+  { code: 'NumpadDecimal', label: 'Num .' },
+  { code: 'NumpadEnter', label: 'Num Enter' }
+]
+
+const ALL_KEY_FUNCTION_LABEL_MAP: Record<string, string> = Object.fromEntries(
+  ALL_KEY_FUNCTIONS.map(f => [f.code, f.label])
+)
+
+/** 获取某功能代码的显示标签（不在候选中时原样返回） */
+export function getKeyFunctionLabel(code: string): string {
+  return ALL_KEY_FUNCTION_LABEL_MAP[code] || code
+}
+
+/** 构建全部功能代码 → 标签 查找表（KeyButton 显示改键后的功能名用） */
+export function buildAllKeyFunctionLabelMap(): Record<string, string> {
+  return { ...ALL_KEY_FUNCTION_LABEL_MAP }
+}
+
+/**
+ * 计算某布局 + 改键配置下「当前已被使用的功能代码」集合。
+ * 规则：普通键位使用其布局 code；被改键的来源键位不再发送原 code，改为发送目标功能。
+ * used = (布局全部 code − 改键来源) ∪ 改键目标
+ */
+export function getUsedFunctionCodes(
+  layout: KeyboardLayout,
+  remap?: Record<string, string>
+): Set<string> {
+  const used = new Set(getLayoutKeyCodes(layout))
+  if (!remap) return used
+  for (const source of Object.keys(remap)) {
+    used.delete(source)
+  }
+  for (const target of Object.values(remap)) {
+    used.add(target)
+  }
+  return used
+}
+
+/**
+ * 可选的改键目标功能：所有候选功能中「当前未被使用」的（避免出现两个按键发送同一功能）。
+ */
+export function getRemapTargetOptions(
+  layout: KeyboardLayout,
+  remap?: Record<string, string>
+): { code: string; label: string }[] {
+  const used = getUsedFunctionCodes(layout, remap)
+  return ALL_KEY_FUNCTIONS.filter(f => !used.has(f.code))
+}
+
+/**
+ * 校验一次改键操作。返回错误提示，null 表示合法。
+ * - 来源必须是布局内的物理键位；
+ * - 同一键位只能改一次；
+ * - 不能改为自身的功能；
+ * - 目标功能不能被当前键盘的其他键位使用（不允许两个按键发送同一功能）。
+ */
+export function validateRemap(
+  layout: KeyboardLayout,
+  remap: Record<string, string> | undefined,
+  source: string,
+  target: string
+): string | null {
+  if (!source) return '请选择要修改的源按键'
+  if (!target) return '请选择目标功能'
+  if (source === target) return '不能把按键修改为它自己的功能'
+
+  const layoutCodes = new Set(getLayoutKeyCodes(layout))
+  if (!layoutCodes.has(source)) return '源按键不在当前键盘布局中'
+
+  if (remap && Object.prototype.hasOwnProperty.call(remap, source)) {
+    return '该按键已被修改，请先在下方移除原有修改'
+  }
+
+  const used = getUsedFunctionCodes(layout, remap)
+  if (used.has(target)) {
+    return `「${getKeyFunctionLabel(target)}」已被其他按键使用，不能重复`
+  }
+
+  return null
+}
+
+/**
+ * 测试/后台记录时的键位解析：把收到的功能 code 反向映射回物理键位 code。
+ * 例：改键 { Delete: 'PrintScreen' }，收到 'PrintScreen' → 解析为 'Delete'。
+ * 找不到映射时原样返回。
+ */
+export function resolveRemappedCode(
+  remap: Record<string, string> | undefined,
+  incomingCode: string
+): string {
+  if (!remap) return incomingCode
+  for (const [position, func] of Object.entries(remap)) {
+    if (func === incomingCode) return position
+  }
+  return incomingCode
 }

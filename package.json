@@ -23,7 +23,8 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "3.0.0",
@@ -47,22 +48,33 @@
     "vue-tsc": "^3.1.6"
   },
   "build": {
-  "appId": "com.keyhealth.app",
-  "productName": "KeyHealth",
-  "directories": {
-    "output": "dist"
+    "appId": "com.keyhealth.app",
+    "productName": "KeyHealth",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   },
-  "win": {
-    "target": [
-      {
-        "target": "dir",
-        "arch": ["x64"]
-      },
-      {
-        "target": "zip",
-        "arch": ["x64"]
-      }
-    ]
+  "allowScripts": {
+    "electron@39.8.9": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.27.7": true,
+    "uiohook-napi@1.5.5": true
   }
-}
 }

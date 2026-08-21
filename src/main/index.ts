@@ -4,9 +4,38 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { getUserData, createRecord, updateRecord, deleteRecord } from './file/io'
 import { loadConfig, saveConfig } from './file/config'
+import { getKeyStats, saveKeyStats, deleteKeyStats } from './file/stats'
+import { startBackgroundHook, stopBackgroundHook, type RawKeyEvent } from './hook/backgroundHook'
 
 // 测试模式状态（由渲染进程通过 IPC 控制）：开启后主进程把按键事件转发给渲染进程用于可视化
 let testModeActive = false
+
+// 后台记录状态：开启后通过系统级键盘钩子捕获按键，即使窗口不在前台也持续记录
+let backgroundRecordingActive = false
+
+/**
+ * 切换后台记录：开启时安装全局按键钩子并把事件转发给渲染进程；
+ * 关闭时卸载钩子。返回是否成功开启（钩子安装失败时返回 false）。
+ */
+function setBackgroundRecording(win: BrowserWindow, active: boolean): boolean {
+  backgroundRecordingActive = !!active
+
+  if (backgroundRecordingActive) {
+    const listener = (data: RawKeyEvent): void => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('raw-key-event', data)
+      }
+    }
+    const ok = startBackgroundHook(listener)
+    if (!ok) {
+      backgroundRecordingActive = false
+    }
+    return ok
+  }
+
+  stopBackgroundHook()
+  return true
+}
 
 /**
  * PrintScreen 在 Windows 上不会触发 before-input-event（也不产生 DOM keydown），
@@ -16,7 +45,8 @@ let testModeActive = false
 function registerPrintScreenShortcut(win: BrowserWindow | null): void {
   if (!win) return
   const ok = globalShortcut.register('PrintScreen', () => {
-    if (!testModeActive) return
+    // 后台记录开启时由系统级键盘钩子转发，避免与全局快捷键重复计数
+    if (!testModeActive || backgroundRecordingActive) return
     if (!win.isFocused()) return
     win.webContents.send('raw-key-event', { type: 'keydown', code: 'PrintScreen', repeat: false })
     setTimeout(() => {
@@ -64,8 +94,9 @@ function createWindow(): void {
   // 在原生层（before-input-event）触发、发生在渲染进程 IME 之前，code 来自硬件扫描码，
   // 可避免中文输入法等在 DOM 层吞掉 Shift 等修饰键；右 Shift/Num Enter 天然准确。
   // PrintScreen 不触发此事件，由 registerPrintScreenShortcut 的全局快捷键单独处理。
+  // 后台记录开启时由系统级键盘钩子（uiohook）作为单一数据源，这里不再转发，避免重复计数。
   mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (!testModeActive) return
+    if (!testModeActive || backgroundRecordingActive) return
     if (input.code === 'PrintScreen') return
     const type = input.type === 'keyDown' ? 'keydown' : input.type === 'keyUp' ? 'keyup' : null
     if (!type) return
@@ -113,9 +144,27 @@ app.whenReady().then(() => {
     return updateRecord(data)
   })
 
-  // 删除记录的 IPC 处理器
+  // 删除记录的 IPC 处理器（同时清理该记录的按键统计）
   ipcMain.handle('delete-record', (_event, id: string) => {
-    return deleteRecord(id)
+    const ok = deleteRecord(id)
+    if (ok) deleteKeyStats(id)
+    return ok
+  })
+
+  // 后台记录开关：开启后主进程安装全局键盘钩子，窗口不在前台也持续转发按键事件
+  ipcMain.handle('set-background-recording', (event, active: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    return setBackgroundRecording(win, !!active)
+  })
+
+  // 按键统计相关 IPC 处理器
+  ipcMain.handle('get-key-stats', (_event, recordId: string) => {
+    return getKeyStats(recordId)
+  })
+
+  ipcMain.handle('save-key-stats', (_event, payload: { recordId: string; recordName: string; counts: Record<string, number> }) => {
+    return saveKeyStats(payload.recordId, payload.recordName, payload.counts)
   })
 
   // 测试模式开关：开启后主进程转发按键，并注册/注销 PrintScreen 全局快捷键
@@ -153,9 +202,18 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // 清理测试模式的 PrintScreen 全局快捷键
   globalShortcut.unregister('PrintScreen')
+  // 清理后台记录的全局键盘钩子
+  stopBackgroundHook()
+  backgroundRecordingActive = false
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+// 应用退出前兜底清理全局键盘钩子
+app.on('will-quit', () => {
+  stopBackgroundHook()
+  backgroundRecordingActive = false
 })
 
 // In this file you can include the rest of your app's specific main process
