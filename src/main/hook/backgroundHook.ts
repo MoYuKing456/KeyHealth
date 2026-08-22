@@ -4,6 +4,10 @@
  *
  * uiohook-napi 的 keycode 是 PS/2 扫描码（与 DOM KeyboardEvent.code 同源），
  * 且能区分左右修饰键（Shift=42 / ShiftRight=54 等），因此可精确映射回 DOM code。
+ *
+ * 重要：uiohook 的低级钩子默认调用 CallNextHookEx 放行按键（非消费式），
+ * 因此用它检测 PrintScreen 不会拦截 Windows 原生截图功能。这与
+ * globalShortcut/RegisterHotKey 不同——全局快捷键会在系统层截获并吞掉按键。
  */
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -58,12 +62,23 @@ export function mapUiohookKeycodeToCode(keycode: number): string | null {
 
 // 钩子是否已安装
 let hookStarted = false
-// 当前要转发事件的监听器（由主进程设置，转发给渲染进程）
-let onKey: ((data: RawKeyEvent) => void) | null = null
+// 订阅管理：多个订阅共享同一个 uiohook 实例，按需独立转发/过滤（引用计数决定何时启停底层钩子）
+let nextSubscriptionId = 1
+const subscriptions = new Map<
+  number,
+  { listener: (data: RawKeyEvent) => void; filter?: (code: string) => boolean }
+>()
+
 // 长按自动重复检测：记录每个键最近一次 keydown 的时间
 const lastKeydownTime = new Map<string, number>()
 // 自动重复间隔阈值（毫秒）：低于此间隔视为按住连发，不计为有效按压
 const REPEAT_WINDOW_MS = 50
+
+function dispatch(data: RawKeyEvent): void {
+  for (const { listener, filter } of subscriptions.values()) {
+    if (!filter || filter(data.code)) listener(data)
+  }
+}
 
 function handleKeydown(e: { keycode: number }): void {
   const code = mapUiohookKeycodeToCode(e.keycode)
@@ -72,25 +87,17 @@ function handleKeydown(e: { keycode: number }): void {
   const last = lastKeydownTime.get(code) || 0
   const repeat = now - last < REPEAT_WINDOW_MS
   lastKeydownTime.set(code, now)
-  onKey?.({ type: 'keydown', code, repeat })
+  dispatch({ type: 'keydown', code, repeat })
 }
 
 function handleKeyup(e: { keycode: number }): void {
   const code = mapUiohookKeycodeToCode(e.keycode)
   if (!code) return
-  onKey?.({ type: 'keyup', code })
+  dispatch({ type: 'keyup', code })
 }
 
-/**
- * 启动全局按键钩子（后台记录）。重复调用时仅更新监听器。
- * 返回是否成功启动（钩子安装失败时返回 false）。
- */
-export function startBackgroundHook(listener: (data: RawKeyEvent) => void): boolean {
-  onKey = listener
-
-  if (hookStarted) {
-    return true
-  }
+function ensureHookStarted(): boolean {
+  if (hookStarted) return true
 
   try {
     uIOhook.on('keydown', handleKeydown)
@@ -103,17 +110,12 @@ export function startBackgroundHook(listener: (data: RawKeyEvent) => void): bool
     console.error('[后台记录] 全局按键钩子启动失败', err)
     uIOhook.removeListener('keydown', handleKeydown)
     uIOhook.removeListener('keyup', handleKeyup)
-    onKey = null
     return false
   }
 }
 
-/**
- * 停止全局按键钩子。未启动时调用是安全的。
- */
-export function stopBackgroundHook(): void {
-  onKey = null
-  if (!hookStarted) return
+function ensureHookStopped(): void {
+  if (subscriptions.size > 0 || !hookStarted) return
 
   try {
     uIOhook.stop()
@@ -125,4 +127,27 @@ export function stopBackgroundHook(): void {
   hookStarted = false
   lastKeydownTime.clear()
   console.log('[后台记录] 全局按键钩子已停止')
+}
+
+/**
+ * 订阅全局按键事件。filter 返回 true 时才把该键转发给 listener（默认转发全部按键）。
+ * 钩子启动失败时返回 -1，否则返回订阅 id（用于 unsubscribeKeys 注销）。
+ */
+export function subscribeKeys(
+  listener: (data: RawKeyEvent) => void,
+  filter?: (code: string) => boolean
+): number {
+  if (!ensureHookStarted()) return -1
+  const id = nextSubscriptionId++
+  subscriptions.set(id, { listener, filter })
+  return id
+}
+
+/**
+ * 注销按键订阅。最后一个订阅注销后会自动停止底层钩子。注销未订阅的 id 是安全的。
+ */
+export function unsubscribeKeys(id: number): void {
+  if (subscriptions.delete(id)) {
+    ensureHookStopped()
+  }
 }

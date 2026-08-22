@@ -371,7 +371,7 @@ const toggleEditMode = () => {
   }
 }
 
-// 测试模式：物理按键的显示与计数统一走主进程转发通道（before-input-event + PrintScreen 全局快捷键）。
+// 测试模式：物理按键的显示与计数统一走主进程转发通道（before-input-event + uiohook 非消费式捕获 PrintScreen）。
 // 该通道在原生层触发、发生在渲染进程 IME 之前，code 来自硬件扫描码：
 // - 可避免中文输入法等在 DOM 层吞掉 Shift 等修饰键（右 Shift 也能被检测到）；
 // - 右 Shift / Num Enter / PrintScreen 天然准确，无需 location 归一化。

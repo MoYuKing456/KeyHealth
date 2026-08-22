@@ -19,7 +19,7 @@ const api = {
   deleteRecord(id: string){
     return ipcRenderer.invoke('delete-record',id)
   },
-  // 订阅主进程转发的原始按键事件（before-input-event 转发全部按键 + PrintScreen 全局快捷键），返回取消订阅函数
+  // 订阅主进程转发的原始按键事件（before-input-event 转发全部按键 + uiohook 非消费式捕获 PrintScreen），返回取消订阅函数
   onTestKeyEvent(callback: (data: { type: 'keydown' | 'keyup'; code: string; repeat?: boolean }) => void){
     const listener = (_event: Electron.IpcRendererEvent, data: any) => callback(data)
     ipcRenderer.on('raw-key-event', listener)
@@ -27,7 +27,7 @@ const api = {
       ipcRenderer.removeListener('raw-key-event', listener)
     }
   },
-  // 通知主进程测试模式开关（开启后主进程转发按键事件并注册 PrintScreen 全局快捷键）
+  // 通知主进程测试模式开关（开启后主进程转发按键事件并按需订阅 PrintScreen）
   setTestMode(active: boolean){
     return ipcRenderer.send('test-mode', active)
   },

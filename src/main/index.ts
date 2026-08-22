@@ -1,17 +1,21 @@
-import { app, shell, BrowserWindow, ipcMain, globalShortcut } from 'electron'
+import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { getUserData, createRecord, updateRecord, deleteRecord } from './file/io'
 import { loadConfig, saveConfig } from './file/config'
 import { getKeyStats, saveKeyStats, deleteKeyStats } from './file/stats'
-import { startBackgroundHook, stopBackgroundHook, type RawKeyEvent } from './hook/backgroundHook'
+import { subscribeKeys, unsubscribeKeys, type RawKeyEvent } from './hook/backgroundHook'
 
 // 测试模式状态（由渲染进程通过 IPC 控制）：开启后主进程把按键事件转发给渲染进程用于可视化
 let testModeActive = false
 
 // 后台记录状态：开启后通过系统级键盘钩子捕获按键，即使窗口不在前台也持续记录
 let backgroundRecordingActive = false
+// 后台记录对应的全键订阅 id（uiohook）
+let backgroundRecordingSubscription: number | null = null
+// 测试模式下单独监听 PrintScreen 的订阅 id（后台记录开启时由全键钩子统一转发，无需单独订阅）
+let printScreenTestSubscription: number | null = null
 
 /**
  * 切换后台记录：开启时安装全局按键钩子并把事件转发给渲染进程；
@@ -26,40 +30,48 @@ function setBackgroundRecording(win: BrowserWindow, active: boolean): boolean {
         win.webContents.send('raw-key-event', data)
       }
     }
-    const ok = startBackgroundHook(listener)
-    if (!ok) {
+    const id = subscribeKeys(listener)
+    if (id === -1) {
       backgroundRecordingActive = false
+      return false
     }
-    return ok
+    backgroundRecordingSubscription = id
+  } else if (backgroundRecordingSubscription !== null) {
+    unsubscribeKeys(backgroundRecordingSubscription)
+    backgroundRecordingSubscription = null
   }
 
-  stopBackgroundHook()
+  // 后台记录状态变化会影响 PrintScreen 的检测方式，同步刷新订阅
+  updatePrintScreenTestHook(win)
   return true
 }
 
 /**
  * PrintScreen 在 Windows 上不会触发 before-input-event（也不产生 DOM keydown），
- * 只能改用系统级全局快捷键捕获。注册期间按 PrintScreen 会被本应用截获（不会触发系统截图）。
- * 全局快捷键只有按下回调，抬起用短延时模拟，保证按键可视化能恢复。
+ * 只能靠系统级键盘钩子捕获。这里使用非消费式的 uiohook 低级钩子（默认 CallNextHookEx 放行），
+ * 因此既能检测到 PrtSc 按压，又不会拦截 Windows 原生截图（复制屏幕到剪贴板）。
+ *
+ * 注意：不能改用 globalShortcut/RegisterHotKey —— 全局快捷键会把 PrintScreen 截获吞掉，
+ * 导致测试模式下原生截图功能失效（这正是非测试模式正常、测试模式失灵的原因）。
+ *
+ * 仅在「测试模式开启且后台记录关闭」时单独订阅 PrintScreen（后台记录开启时全键钩子已覆盖，
+ * 避免同一按键被转发两次）。uiohook 能提供真实的 keyup，无需像全局快捷键那样延时模拟抬起。
  */
-function registerPrintScreenShortcut(win: BrowserWindow | null): void {
-  if (!win) return
-  const ok = globalShortcut.register('PrintScreen', () => {
-    // 后台记录开启时由系统级键盘钩子转发，避免与全局快捷键重复计数
-    if (!testModeActive || backgroundRecordingActive) return
-    if (!win.isFocused()) return
-    win.webContents.send('raw-key-event', { type: 'keydown', code: 'PrintScreen', repeat: false })
-    setTimeout(() => {
-      if (testModeActive) {
-        win.webContents.send('raw-key-event', { type: 'keyup', code: 'PrintScreen' })
-      }
-    }, 120)
-  })
-  if (!ok) {
-    console.warn('[PrintScreen 全局快捷键注册失败]')
+function updatePrintScreenTestHook(win: BrowserWindow | null): void {
+  if (printScreenTestSubscription !== null) {
+    unsubscribeKeys(printScreenTestSubscription)
+    printScreenTestSubscription = null
   }
+  if (!testModeActive || backgroundRecordingActive || !win) return
+  printScreenTestSubscription = subscribeKeys(
+    (data) => {
+      // 与 before-input-event 通道一致：仅在窗口聚焦时可视化
+      if (win.isDestroyed() || !win.isFocused()) return
+      win.webContents.send('raw-key-event', data)
+    },
+    (code) => code === 'PrintScreen'
+  )
 }
-
 
 function createWindow(): void {
   // 预读配置，获取主题（用于消除启动闪屏）
@@ -93,7 +105,7 @@ function createWindow(): void {
   // 测试模式：把按键事件转发给渲染进程用于可视化（不 preventDefault，保证 keyup 正常送达）。
   // 在原生层（before-input-event）触发、发生在渲染进程 IME 之前，code 来自硬件扫描码，
   // 可避免中文输入法等在 DOM 层吞掉 Shift 等修饰键；右 Shift/Num Enter 天然准确。
-  // PrintScreen 不触发此事件，由 registerPrintScreenShortcut 的全局快捷键单独处理。
+  // PrintScreen 不触发此事件，由 updatePrintScreenTestHook 的非消费式低级钩子单独处理（不拦截原生截图）。
   // 后台记录开启时由系统级键盘钩子（uiohook）作为单一数据源，这里不再转发，避免重复计数。
   mainWindow.webContents.on('before-input-event', (_event, input) => {
     if (!testModeActive || backgroundRecordingActive) return
@@ -167,15 +179,11 @@ app.whenReady().then(() => {
     return saveKeyStats(payload.recordId, payload.recordName, payload.counts)
   })
 
-  // 测试模式开关：开启后主进程转发按键，并注册/注销 PrintScreen 全局快捷键
+  // 测试模式开关：开启后主进程转发按键，并按需订阅/注销 PrintScreen（非消费式低级钩子）
   ipcMain.on('test-mode', (event, active: boolean) => {
     testModeActive = !!active
     const win = BrowserWindow.fromWebContents(event.sender)
-    if (testModeActive) {
-      registerPrintScreenShortcut(win)
-    } else {
-      globalShortcut.unregister('PrintScreen')
-    }
+    updatePrintScreenTestHook(win)
   })
 
   // 配置相关的 IPC 处理器
@@ -200,19 +208,32 @@ app.whenReady().then(() => {
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
-  // 清理测试模式的 PrintScreen 全局快捷键
-  globalShortcut.unregister('PrintScreen')
+  // 清理测试模式对 PrintScreen 的监听订阅
+  if (printScreenTestSubscription !== null) {
+    unsubscribeKeys(printScreenTestSubscription)
+    printScreenTestSubscription = null
+  }
   // 清理后台记录的全局键盘钩子
-  stopBackgroundHook()
+  if (backgroundRecordingSubscription !== null) {
+    unsubscribeKeys(backgroundRecordingSubscription)
+    backgroundRecordingSubscription = null
+  }
   backgroundRecordingActive = false
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
-// 应用退出前兜底清理全局键盘钩子
+// 应用退出前兜底清理全局键盘钩子（unsubscribeKeys 会在最后一个订阅注销后自动停止底层钩子）
 app.on('will-quit', () => {
-  stopBackgroundHook()
+  if (printScreenTestSubscription !== null) {
+    unsubscribeKeys(printScreenTestSubscription)
+    printScreenTestSubscription = null
+  }
+  if (backgroundRecordingSubscription !== null) {
+    unsubscribeKeys(backgroundRecordingSubscription)
+    backgroundRecordingSubscription = null
+  }
   backgroundRecordingActive = false
 })
 
